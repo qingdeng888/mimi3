@@ -942,4 +942,4 @@ async def _forward_request(request: Request, path: str):
 
 if __name__ == "__main__":
     logger.info("🚀 启动支持多节点的公网网关...")
-    uvicorn.run(app, host="0.0.0.0", port=18000, ws_max_size=10**8)
+    uvicorn.run(app, host="0.0.0.0", port=18619, ws_max_size=10**8)
