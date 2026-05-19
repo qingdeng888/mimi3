@@ -120,8 +120,8 @@ python main.py
 
 启动成功后访问：
 
-- 控制面板：`http://<你的服务器>:18619/webui`
-- API 基址：`http://<你的服务器>:18619/v1`（或 `/anthropic/v1`）
+- 控制面板：`http://<你的服务器>:23655/webui`
+- API 基址：`http://<你的服务器>:23655/v1`（或 `/anthropic/v1`）
 
 ---
 
@@ -132,8 +132,8 @@ python main.py
 | 变量 | 必填 | 默认 | 说明 |
 | --- | --- | --- | --- |
 | `SERVER_HOST` | 否 | `0.0.0.0` | 网关绑定地址。 |
-| `SERVER_PORT` | 否 | `18619` | 网关绑定端口。 |
-| `WS_TUNNEL_URL` | **是** | `ws://{HOST}:{PORT}/ws` | Claw 节点反向连接的 WebSocket 地址。**必须是 Claw 容器能访问到的公网/穿透地址**，例如 `ws://your-domain.com:18619/ws` 或 `wss://your-domain.com/ws`。端口可自由自定义，详见 [端口与 WS_TUNNEL_URL 自定义](#端口与-ws_tunnel_url-自定义)。 |
+| `SERVER_PORT` | 否 | `23655` | 网关绑定端口。 |
+| `WS_TUNNEL_URL` | **是** | `ws://{HOST}:{PORT}/ws` | Claw 节点反向连接的 WebSocket 地址。**必须是 Claw 容器能访问到的公网/穿透地址**，例如 `ws://your-domain.com:23655/ws` 或 `wss://your-domain.com/ws`。端口可自由自定义，详见 [端口与 WS_TUNNEL_URL 自定义](#端口与-ws_tunnel_url-自定义)。 |
 | `MIMO_RELAY_OPENAI_KEY` | 否 | 空 | 客户端调用 `/v1/*`、`/anthropic/v1/*` 时携带的 Bearer Key。**留空 = 不鉴权**。 |
 | `MIMO_WEBUI_USERNAME` | 否 | `admin` | WebUI 登录用户名。 |
 | `MIMO_WEBUI_PASSWORD` | 否 | 空 | WebUI 登录密码。**留空 = 不启用 WebUI 登录**。 |
@@ -150,8 +150,8 @@ python main.py
 
 ```dotenv
 SERVER_HOST=0.0.0.0
-SERVER_PORT=18619
-WS_TUNNEL_URL=ws://your-domain.com:18619/ws
+SERVER_PORT=23655
+WS_TUNNEL_URL=ws://your-domain.com:23655/ws
 
 MIMO_RELAY_OPENAI_KEY=sk-your-random-secret-here
 MIMO_WEBUI_USERNAME=admin
@@ -207,7 +207,7 @@ MIMO_XIEQU_API_URL=http://api.xiequ.cn/VAD/GetIp.aspx?act=...&num=1&...
 
 ## 端口与 WS_TUNNEL_URL 自定义
 
-`SERVER_PORT` 与 `WS_TUNNEL_URL` 的端口**没有任何硬编码限制**，18619 仅是默认值。三个变量之间的关系如下：
+`SERVER_PORT` 与 `WS_TUNNEL_URL` 的端口**没有任何硬编码限制**，23655 仅是默认值。三个变量之间的关系如下：
 
 ```
 ┌─────────────────────────────┐         ┌──────────────────────────────┐
@@ -246,13 +246,13 @@ async with websockets.connect(WS_URL, max_size=10**8) as ws: ...
 #### 场景 A：VPS 裸跑（端口 = 直接对外）
 
 ```dotenv
-SERVER_PORT=18619
-WS_TUNNEL_URL=ws://your-domain.com:18619/ws
+SERVER_PORT=23655
+WS_TUNNEL_URL=ws://your-domain.com:23655/ws
 ```
 
-- 网关本机监听 18619；
-- Claw 容器直连 `your-domain.com:18619`；
-- 防火墙 / 安全组放行 TCP 18619；
+- 网关本机监听 23655；
+- Claw 容器直连 `your-domain.com:23655`；
+- 防火墙 / 安全组放行 TCP 23655；
 - `SERVER_PORT` 与 `WS_TUNNEL_URL` 的端口**必须一致**。
 
 如果想换成别的端口，比如 25000：
@@ -264,15 +264,15 @@ WS_TUNNEL_URL=ws://your-domain.com:25000/ws
 
 #### 场景 B：Nginx + HTTPS 反代（推荐）
 
-网关本机仍监听 18619，对外用 443（标准 HTTPS）：
+网关本机仍监听 23655，对外用 443（标准 HTTPS）：
 
 ```dotenv
-SERVER_PORT=18619
+SERVER_PORT=23655
 WS_TUNNEL_URL=wss://your-domain.com/ws        # 隐含 443，无需写端口
 MIMO_WEBUI_COOKIE_SECURE=true
 ```
 
-Nginx 把 `443` 反代到 `127.0.0.1:18619`（参考下方 [反向代理 Nginx 示例](#反向代理-nginx-示例)）。
+Nginx 把 `443` 反代到 `127.0.0.1:23655`（参考下方 [反向代理 Nginx 示例](#反向代理-nginx-示例)）。
 
 > **优点**：80 / 443 是 Claw 沙箱出站方向最稳的端口，不会被云内安全策略拦截；同时还能搞 HTTPS 终止 + WebUI Cookie Secure。
 
@@ -281,11 +281,11 @@ Nginx 把 `443` 反代到 `127.0.0.1:18619`（参考下方 [反向代理 Nginx �
 本地机器没有公网 IP 时：
 
 ```dotenv
-SERVER_PORT=18619                                       # 本地监听
+SERVER_PORT=23655                                       # 本地监听
 WS_TUNNEL_URL=wss://abc-1234.trycloudflare.com/ws       # 穿透服务给的对外地址
 ```
 
-- 本地 18619 只对穿透客户端可见即可；
+- 本地 23655 只对穿透客户端可见即可；
 - `WS_TUNNEL_URL` 的端口由穿透服务决定（cloudflared / Caddy 反代默认 443，frp 自行配置），**不必等于 `SERVER_PORT`**。
 
 ### 改端口的常见坑
@@ -295,7 +295,7 @@ WS_TUNNEL_URL=wss://abc-1234.trycloudflare.com/ws       # 穿透服务给的对�
 | 启动后 Claw 一直没接入 | `WS_TUNNEL_URL` 写的端口 ≠ 实际对外端口 | 用 `telnet your-domain.com <端口>` 确认外部能连上 |
 | `WebSocket handshake failed` | Nginx 没转发 `Upgrade: websocket` | 检查 `proxy_set_header Upgrade $http_upgrade` |
 | 改了 `.env` 但没生效 | uvicorn 还是老进程 / Docker 没重建 | `python main.py` 重启；Docker 用 `docker compose up -d --force-recreate` |
-| Docker 改 `SERVER_PORT` 后仍只能 18619 访问 | compose 内 `environment.SERVER_PORT` 把容器内强制设为 18619 | 改 `docker-compose.yml` 中的 `environment` 与 `ports` 同步，或直接保持 18619 只改 `WS_TUNNEL_URL` |
+| Docker 改 `SERVER_PORT` 后仍只能 23655 访问 | compose 内 `environment.SERVER_PORT` 把容器内强制设为 23655 | 改 `docker-compose.yml` 中的 `environment` 与 `ports` 同步，或直接保持 23655 只改 `WS_TUNNEL_URL` |
 
 > 推荐：**生产用 Nginx 反代 + WSS（场景 B）**；本机临时调试用 cloudflared（场景 C）；只有完全自己的 VPS 才用裸端口（场景 A）。
 
@@ -324,7 +324,7 @@ WS_TUNNEL_URL=wss://abc-1234.trycloudflare.com/ws       # 穿透服务给的对�
 
 **方式 A：通过 WebUI 一键导入（推荐）**
 
-1. 打开 `http://<你的服务器>:18619/webui` 并登录。
+1. 打开 `http://<你的服务器>:23655/webui` 并登录。
 2. 在「账号管理」中点击「添加账号」。
 3. 直接粘贴 DevTools 复制下来的整段 Cookie 字符串（如 `userId=xxx; serviceToken=yyy; xiaomichatbot_ph=zzz`）。
 4. 网关会自动正则解析三个字段，并写入 `users/user_<userId>.json`。
@@ -346,8 +346,8 @@ python main.py
 启动后会看到类似日志：
 
 ```
-🚀 mimo2api 统一主入口 - 正在启动网关并绑定集群到 0.0.0.0:18619
-🔗 云端要求 Claw 主动连接的桥接 WS URL 将统一下发为: ws://your-domain.com:18619/ws
+🚀 mimo2api 统一主入口 - 正在启动网关并绑定集群到 0.0.0.0:23655
+🔗 云端要求 Claw 主动连接的桥接 WS URL 将统一下发为: ws://your-domain.com:23655/ws
 🔐 AI API 鉴权已启用
 🔐 WebUI 鉴权已启用，登录用户: admin
 🚀 正在拉起挂后台的 Claw 账号守护线程...
@@ -383,7 +383,7 @@ python main.py
 
 ## API 使用指南
 
-> 默认 API Base URL：`http://<你的服务器>:18619`
+> 默认 API Base URL：`http://<你的服务器>:23655`
 > 若设置了 `MIMO_RELAY_OPENAI_KEY`，所有 `/v1/*` 与 `/anthropic/v1/*` 请求都需在 Header 中携带 `Authorization: Bearer <key>`（`x-api-key` / `api-key` 也兼容）。
 
 ### 可用模型
@@ -409,7 +409,7 @@ python main.py
 完全等价 OpenAI Chat Completions：
 
 ```bash
-curl -N http://your-host:18619/v1/chat/completions \
+curl -N http://your-host:23655/v1/chat/completions \
   -H "Authorization: Bearer $MIMO_RELAY_OPENAI_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -428,7 +428,7 @@ curl -N http://your-host:18619/v1/chat/completions \
 OpenAI Responses API（新协议）。网关会自动转换为内部 chat.completions 调用，再把响应转回 Responses 协议（含完整 SSE 事件流）。
 
 ```bash
-curl -N http://your-host:18619/v1/responses \
+curl -N http://your-host:23655/v1/responses \
   -H "Authorization: Bearer $MIMO_RELAY_OPENAI_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -451,7 +451,7 @@ curl -N http://your-host:18619/v1/responses \
 直接以 Claude Messages 协议调用：
 
 ```bash
-curl -N http://your-host:18619/anthropic/v1/messages \
+curl -N http://your-host:23655/anthropic/v1/messages \
   -H "Authorization: Bearer $MIMO_RELAY_OPENAI_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -477,7 +477,7 @@ curl -N http://your-host:18619/anthropic/v1/messages \
 OpenAI TTS 协议：
 
 ```bash
-curl http://your-host:18619/v1/audio/speech \
+curl http://your-host:23655/v1/audio/speech \
   -H "Authorization: Bearer $MIMO_RELAY_OPENAI_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -545,7 +545,7 @@ curl http://your-host:18619/v1/audio/speech \
 from openai import OpenAI
 
 client = OpenAI(
-    base_url="http://your-host:18619/v1",
+    base_url="http://your-host:23655/v1",
     api_key="sk-your-random-secret-here",  # 即 MIMO_RELAY_OPENAI_KEY
 )
 
@@ -565,7 +565,7 @@ for chunk in resp:
 from anthropic import Anthropic
 
 client = Anthropic(
-    base_url="http://your-host:18619/anthropic",
+    base_url="http://your-host:23655/anthropic",
     api_key="sk-your-random-secret-here",
 )
 msg = client.messages.create(
@@ -578,9 +578,9 @@ print(msg.content[0].text)
 
 ### 第三方 UI
 
-- **Cherry Studio / NextChat / LobeChat**：选「OpenAI 兼容」，Base URL 填 `http://your-host:18619/v1`，Key 填 `MIMO_RELAY_OPENAI_KEY`。
+- **Cherry Studio / NextChat / LobeChat**：选「OpenAI 兼容」，Base URL 填 `http://your-host:23655/v1`，Key 填 `MIMO_RELAY_OPENAI_KEY`。
 - **OneAPI / NewAPI**：作为「OpenAI」上游接入即可。
-- **Cline / Claude Code**：选「Anthropic」，Base URL 填 `http://your-host:18619/anthropic`。
+- **Cline / Claude Code**：选「Anthropic」，Base URL 填 `http://your-host:23655/anthropic`。
 
 ---
 
@@ -599,7 +599,7 @@ server {
     ssl_certificate_key /etc/letsencrypt/live/your-domain.com/privkey.pem;
 
     location / {
-        proxy_pass http://127.0.0.1:18619;
+        proxy_pass http://127.0.0.1:23655;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -671,15 +671,15 @@ docker compose logs -f mimi3
 
 启动后：
 
-- 控制面板：`http://<宿主机 IP>:18619/webui`
-- API 基址：`http://<宿主机 IP>:18619/v1`、`http://<宿主机 IP>:18619/anthropic/v1`
+- 控制面板：`http://<宿主机 IP>:23655/webui`
+- API 基址：`http://<宿主机 IP>:23655/v1`、`http://<宿主机 IP>:23655/anthropic/v1`
 
 #### 镜像内置默认行为
 
 | 项 | 容器内路径 / 值 | 说明 |
 | --- | --- | --- |
 | 工作目录 | `/app` | 项目代码 |
-| 监听端口 | `18619` | 由 `SERVER_PORT` 覆盖 |
+| 监听端口 | `23655` | 由 `SERVER_PORT` 覆盖 |
 | 时区 | `Asia/Shanghai` | 通过 `tzdata` |
 | `MIMO_METRICS_DB_PATH` | `/app/data/gateway_metrics.db` | SQLite 指标库 |
 | `MIMO_METRICS_SNAPSHOT_PATH` | `/app/data/gateway_snapshot.json` | 内存指标快照 |
@@ -706,10 +706,10 @@ docker compose logs -f mimi3
 
 ```yaml
 ports:
-  - "127.0.0.1:18619:18619"
+  - "127.0.0.1:23655:23655"
 ```
 
-然后由宿主机的 Nginx 反代到 `127.0.0.1:18619`（参考上面 [Nginx 示例](#反向代理-nginx-示例)）。
+然后由宿主机的 Nginx 反代到 `127.0.0.1:23655`（参考上面 [Nginx 示例](#反向代理-nginx-示例)）。
 
 #### 常用运维命令
 
@@ -738,7 +738,7 @@ docker build -t mimi3:latest .
 
 docker run -d --name mimi3 \
   --restart unless-stopped \
-  -p 18619:18619 \
+  -p 23655:23655 \
   --env-file .env \
   -v $(pwd)/users:/app/users \
   -v $(pwd)/logs:/app/logs \
