@@ -144,6 +144,7 @@ python main.py
 | `MIMO_NODE_401_COOLDOWN_SECONDS` | 否 | `900` | 节点返回 401 时的冷却时长。 |
 | `MIMO_PROCESS_LOCK_PATH` | 否 | `项目目录/mimo2api.lock` | 单进程锁文件路径，避免重复启动同一份网关。 |
 | `MIMO_PROXY_URL` | 否 | 空 | 代理地址，**仅用于 Claw 创建/销毁/状态查询**请求（不影响客户端 API 转发）。支持 HTTP / HTTPS / SOCKS5。格式：`http://ip:port`、`socks5://user:pass@ip:port`。留空 = 不走代理。 |
+| `MIMO_XIEQU_API_URL` | 否 | 空 | 携趣 IP 短效代理 API 提取地址（可选，**优先级高于 `MIMO_PROXY_URL`**）。配置后，每次"创建/销毁 mimo-claw"前都会实时拉一条 HTTP 短效代理（≈30 秒）使用，用完即丢，避免拼用静态代理被风控。也可以在 WebUI 的「携趣 IP 短效代理」卡片里填入并热加载。 |
 
 `.env` 模板示例：
 
@@ -186,6 +187,21 @@ MIMO_PROXY_URL=socks5://user:password@1.2.3.4:1080
 > **不走代理**的部分：客户端的 `/v1/*`、`/anthropic/v1/*` API 转发，以及 Claw 容器反向连接到 `/ws` 的 WebSocket 隧道。
 
 > **SOCKS5 依赖**：使用 SOCKS5 代理需要安装 `socksio`，项目 `requirements.txt` 已包含 `httpx[socks]`，会自动安装。
+
+### 携趣 IP 短效代理（可选，推荐）
+
+中国大陆的"短效代理"服务（如携趣）通常一次只返回一条 30 秒内有效的 `ip:port`。配置后，网关会在**每次创建 / 销毁 mimo-claw 前**实时拉一条新代理用于这次动作，动作结束后立即丢弃，全程不持有长期代理。
+
+```dotenv
+# 直接在 .env 里写
+MIMO_XIEQU_API_URL=http://api.xiequ.cn/VAD/GetIp.aspx?act=...&num=1&...
+```
+
+或在 WebUI 的「携趣 IP 短效代理」卡片里填入并保存，立即热加载，无需重启。
+
+> - 优先级：携趣 API > `MIMO_PROXY_URL` > 直连
+> - 若携趣 API 返回失败，会自动回退到 `MIMO_PROXY_URL` / 直连，不阻塞流程
+> - 仅 `agreement` / `create` / `destroy` 这几个"动作 POST"走携趣短效代理；后续状态轮询走静态代理 / 直连，避免短效代理 30 秒到期后干扰长轮询
 
 ---
 
