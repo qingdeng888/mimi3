@@ -43,6 +43,17 @@ ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BASE_URL = "https://aistudio.xiaomimimo.com"
 WS_URL = "wss://aistudio.xiaomimimo.com/ws/proxy"
 
+
+def _get_proxy_url() -> str | None:
+    """获取代理地址，仅用于 Claw 创建/销毁/状态查询请求"""
+    return os.getenv("MIMO_PROXY_URL", "").strip() or None
+
+
+def _make_claw_http_client(timeout: int = 30) -> httpx.AsyncClient:
+    """创建用于 Claw API 调用的 httpx 客户端（带可选代理）"""
+    proxy = _get_proxy_url()
+    return httpx.AsyncClient(proxy=proxy, timeout=timeout)
+
 # ----------------- 用户加载逻辑 (遵循 web_core.py 原版逻辑) -----------------
 def load_all_users() -> dict:
     """从 users/ 目录读取所有用户的登录凭证"""
@@ -110,7 +121,7 @@ class NativeClawClient:
         c_copy = dict(self.cookies)
         c_copy['xiaomichatbot_ph'] = self.ph
         try:
-            async with httpx.AsyncClient() as client:
+            async with _make_claw_http_client(timeout=30) as client:
                 r = await client.post(url, cookies=c_copy, headers=_aistudio_headers(), timeout=30)
                 data = r.json()
                 if data.get("code") == 0:
@@ -131,7 +142,7 @@ class NativeClawClient:
         url_status = f"{BASE_URL}/open-apis/user/mimo-claw/status"
         url_agree = f"{BASE_URL}/open-apis/agreement/user/mimo-claw?xiaomichatbot_ph={quote(self.ph)}"
         
-        async with httpx.AsyncClient() as client:
+        async with _make_claw_http_client(timeout=30) as client:
             # 1. 尝试签署 agreement
             try:
                 await client.post(url_agree, cookies=self.cookies, headers=_aistudio_headers(), timeout=15)
@@ -170,7 +181,7 @@ class NativeClawClient:
     async def _get_ticket(self) -> str:
         """获取建立 ws 需要的 ticket"""
         url = f"{BASE_URL}/open-apis/user/ws/ticket?xiaomichatbot_ph={quote(self.ph)}"
-        async with httpx.AsyncClient() as client:
+        async with _make_claw_http_client(timeout=15) as client:
             for attempt in range(5):
                 r = await client.get(url, cookies=self.cookies, headers=_aistudio_headers(), timeout=15)
                 if r.status_code == 200:
@@ -318,7 +329,7 @@ class AccountManager:
         """获取当前容器的状态和剩余时间(秒)"""
         url = f"{BASE_URL}/open-apis/user/mimo-claw/status"
         try:
-            async with httpx.AsyncClient() as c:
+            async with _make_claw_http_client(timeout=15) as c:
                 r = await c.get(url, cookies=self.cookies, headers=_aistudio_headers(), timeout=15)
                 data = r.json()
                 st = data.get("data", {}).get("status", "")
