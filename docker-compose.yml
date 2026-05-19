@@ -27,14 +27,14 @@ services:
     # 与下方 volumes 挂载点保持一致。
     environment:
       SERVER_HOST: 0.0.0.0
-      SERVER_PORT: 18000
+      SERVER_PORT: 18619
       MIMO_METRICS_DB_PATH: /app/data/gateway_metrics.db
       MIMO_METRICS_SNAPSHOT_PATH: /app/data/gateway_snapshot.json
       MIMO_PROCESS_LOCK_PATH: /app/data/mimo2api.lock
 
     ports:
-      # 宿主机端口可通过 .env 中的 SERVER_PORT 覆盖（默认 18000）
-      - "${SERVER_PORT:-18000}:18000"
+      # 宿主机端口可通过 .env 中的 SERVER_PORT 覆盖（默认 18619）
+      - "${SERVER_PORT:-18619}:18619"
 
     volumes:
       # 账号池 —— 每个账号一个 user_<uid>.json
@@ -51,7 +51,7 @@ services:
         - CMD
         - curl
         - -fsS
-        - http://127.0.0.1:18000/api/auth/session
+        - http://127.0.0.1:18619/api/auth/session
       interval: 30s
       timeout: 5s
       retries: 3
