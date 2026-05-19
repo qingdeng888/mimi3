@@ -176,6 +176,81 @@ async def api_users_add(request: Request):
     except Exception as e:
         return JSONResponse({"detail": str(e)}, status_code=500)
 
+@router.post("/api/users/recreate/{uid}")
+async def api_users_recreate(uid: str):
+    """手动触发单个账号的销毁 + 创建流程"""
+    from urllib.parse import quote
+
+    target_file = os.path.join(USERS_DIR, f"user_{uid}.json")
+    if not os.path.exists(target_file):
+        return JSONResponse({"detail": "User not found"}, status_code=404)
+
+    try:
+        with open(target_file, "r", encoding="utf-8") as f:
+            user_data = json.load(f)
+    except Exception as e:
+        return JSONResponse({"detail": f"读取账号文件失败: {e}"}, status_code=500)
+
+    ph = user_data.get("xiaomichatbot_ph", "")
+    cookies = {
+        "serviceToken": user_data.get("serviceToken", ""),
+        "userId": user_data.get("userId", ""),
+        "xiaomichatbot_ph": ph,
+    }
+    headers = {
+        "Accept": "*/*",
+        "Content-Type": "application/json",
+        "Origin": "https://aistudio.xiaomimimo.com",
+        "Referer": "https://aistudio.xiaomimimo.com/",
+        "User-Agent": "Mozilla/5.0",
+    }
+    base = "https://aistudio.xiaomimimo.com"
+
+    async with httpx.AsyncClient() as client:
+        # 1. 销毁旧实例
+        try:
+            destroy_url = f"{base}/open-apis/user/mimo-claw/destroy?xiaomichatbot_ph={quote(ph)}"
+            await client.post(destroy_url, cookies=cookies, headers=headers, timeout=15)
+            await asyncio.sleep(3)
+        except Exception:
+            pass
+
+        # 2. 创建新实例
+        create_url = f"{base}/open-apis/user/mimo-claw/create?xiaomichatbot_ph={quote(ph)}"
+        try:
+            r = await client.post(create_url, cookies=cookies, headers=headers, timeout=20)
+            if r.status_code == 401:
+                return JSONResponse({"detail": "凭证已过期 (401)，请重新导入 Cookie"}, status_code=401)
+        except Exception as e:
+            return JSONResponse({"detail": f"创建请求异常: {e}"}, status_code=502)
+
+        # 3. 轮询等待状态（最多 60 秒）
+        status_url = f"{base}/open-apis/user/mimo-claw/status"
+        deadline = time.time() + 60
+        last_status = ""
+        while time.time() < deadline:
+            try:
+                sr = await client.get(status_url, cookies=cookies, headers=headers, timeout=10)
+                if sr.status_code == 401:
+                    return JSONResponse({"detail": "凭证已过期 (401)"}, status_code=401)
+                d = sr.json()
+                st = (d.get("data") or {}).get("status", "")
+                if st:
+                    last_status = st
+                if st == "AVAILABLE":
+                    # 创建成功后触发全局重建信号让 Manager 感知并注入 bridge
+                    from .manager import trigger_rebuild
+                    trigger_rebuild()
+                    return JSONResponse({"status": "ok", "claw_status": "AVAILABLE", "message": "环境创建成功，已触发桥接注入"})
+                if st in ("FAILED", "CREATE_FAILED", "ERROR"):
+                    return JSONResponse({"detail": f"创建失败，状态: {st}"}, status_code=502)
+            except Exception:
+                pass
+            await asyncio.sleep(3)
+
+        return JSONResponse({"detail": f"创建超时，最后状态: {last_status}"}, status_code=504)
+
+
 @router.delete("/api/users/delete/{uid}")
 async def api_users_delete(uid: str):
     target_file = os.path.join(USERS_DIR, f"user_{uid}.json")
