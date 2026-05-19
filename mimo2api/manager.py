@@ -457,34 +457,78 @@ class AccountManager:
                 await client.close()
                 await asyncio.sleep(60)
 
+# 全局任务注册表：uid -> asyncio.Task，供热加载使用
+_account_tasks: dict[str, asyncio.Task] = {}
+_HOTRELOAD_INTERVAL = 10  # 每 10 秒扫描一次 users/ 目录
+
+
+def _spawn_account_task(uid: str, user_info: dict, stagger_offset: int = 0, init_delay: float = 0):
+    """为单个账号创建并注册后台生命周期任务"""
+    manager = AccountManager(uid, user_info, stagger_offset=stagger_offset)
+
+    async def _run():
+        if init_delay > 0:
+            await asyncio.sleep(init_delay)
+        await manager.run_lifecycle()
+
+    task = asyncio.create_task(_run())
+    _account_tasks[uid] = task
+    return task
+
+
 async def start_manager_tasks():
+    """
+    Manager 主入口（带热加载）。
+    - 首次扫描 users/ 目录，错峰拉起所有账号的生命周期任务。
+    - 之后每 10 秒扫描一次，自动发现新增/删除的账号并动态增删任务。
+    """
     logger.info("🚀 mimo2api 分布式并发账号池控制引擎 (Manager) 已点火启动!")
+
+    # ---------- 首次加载 ----------
     users = load_all_users()
-    if not users:
-        logger.error("非常遗憾, 你还没往 users 目录下存入有效的新版数据配置！")
-        return
-    
-    logger.info(f"共通过 users/ 扫描并成功重载入 {len(users)} 个授权用户预设账号。")
-    tasks = []
-    
-    # 为了避免所有账号同时进入强制销毁重建期导致空窗，引入 stagger 错峰分配策略
-    total_users = len(users)
-    max_stagger_window = 50 * 60 # 分摊在 50 分钟内
-    stagger_step = max_stagger_window // total_users if total_users > 1 else 0
+    if users:
+        logger.info(f"共通过 users/ 扫描并成功重载入 {len(users)} 个授权用户预设账号。")
+        total_users = len(users)
+        max_stagger_window = 50 * 60
+        stagger_step = max_stagger_window // total_users if total_users > 1 else 0
 
-    async def _delayed_start(mgr, init_sleep):
-        if init_sleep > 0:
-            await asyncio.sleep(init_sleep)
-        await mgr.run_lifecycle()
+        for i, (uid, user_info) in enumerate(users.items()):
+            stagger_offset = i * stagger_step
+            _spawn_account_task(uid, user_info, stagger_offset=stagger_offset, init_delay=i * 3.0)
+    else:
+        logger.warning("⚠️ users/ 目录暂无账号，等待热加载新凭证...")
 
-    for i, (uid, user_info) in enumerate(users.items()):
-        stagger_offset = i * stagger_step
-        manager = AccountManager(uid, user_info, stagger_offset=stagger_offset)
-        # 初始启动小幅错开 3 秒，避免并发导致 API 短期拒绝
-        t = asyncio.create_task(_delayed_start(manager, i * 3.0))
-        tasks.append(t)
-    
-    await asyncio.gather(*tasks, return_exceptions=True)
+    # ---------- 热加载巡检循环 ----------
+    while True:
+        await asyncio.sleep(_HOTRELOAD_INTERVAL)
+        try:
+            current_users = load_all_users()
+            current_uids = set(current_users.keys())
+            managed_uids = set(_account_tasks.keys())
+
+            # 发现新账号 → 拉起任务
+            new_uids = current_uids - managed_uids
+            for uid in new_uids:
+                logger.info(f"🆕 热加载: 发现新账号 {uid}，正在拉起生命周期任务...")
+                _spawn_account_task(uid, current_users[uid], stagger_offset=0, init_delay=0)
+
+            # 发现已删除账号 → 取消任务
+            removed_uids = managed_uids - current_uids
+            for uid in removed_uids:
+                task = _account_tasks.pop(uid, None)
+                if task and not task.done():
+                    logger.info(f"🗑️ 热加载: 账号 {uid} 已删除，正在取消其生命周期任务...")
+                    task.cancel()
+
+            # 清理已自然结束的任务（异常退出等）
+            for uid in list(_account_tasks.keys()):
+                if _account_tasks[uid].done():
+                    _account_tasks.pop(uid, None)
+
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"热加载巡检异常: {e}")
 
 async def main():
     await start_manager_tasks()
