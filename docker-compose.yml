@@ -1,0 +1,64 @@
+# mimi3 (mimo2api) - Docker Compose
+#
+# 使用前请先准备：
+#   1. cp env.example .env  （并按需修改 WS_TUNNEL_URL / MIMO_RELAY_OPENAI_KEY 等）
+#   2. mkdir -p users logs data   # 用于持久化账号、日志、指标
+#
+# 启动：
+#   docker compose up -d --build
+#
+# 查看日志：
+#   docker compose logs -f mimi3
+
+services:
+  mimi3:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: mimi3:latest
+    container_name: mimi3
+    restart: unless-stopped
+
+    # 通过 .env 注入业务环境变量（WS_TUNNEL_URL / MIMO_RELAY_OPENAI_KEY 等）
+    env_file:
+      - .env
+
+    # 这些值可在 .env 中覆盖；放在这里是给出"容器内默认路径"，
+    # 与下方 volumes 挂载点保持一致。
+    environment:
+      SERVER_HOST: 0.0.0.0
+      SERVER_PORT: 8000
+      MIMO_METRICS_DB_PATH: /app/data/gateway_metrics.db
+      MIMO_METRICS_SNAPSHOT_PATH: /app/data/gateway_snapshot.json
+      MIMO_PROCESS_LOCK_PATH: /app/data/mimo2api.lock
+
+    ports:
+      # 宿主机端口可通过 .env 中的 SERVER_PORT 覆盖（默认 8000）
+      - "${SERVER_PORT:-8000}:8000"
+
+    volumes:
+      # 账号池 —— 每个账号一个 user_<uid>.json
+      - ./users:/app/users
+      # 运行日志（gateway.log 滚动文件）
+      - ./logs:/app/logs
+      # SQLite 指标库 + 快照 + 进程锁
+      - ./data:/app/data
+      # 模型映射（可被 WebUI / API 在线编辑），单文件挂载需保证宿主上文件存在
+      - ./model_mapping.json:/app/model_mapping.json
+
+    healthcheck:
+      test:
+        - CMD
+        - curl
+        - -fsS
+        - http://127.0.0.1:8000/api/auth/session
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+    # 适度增大文件句柄上限，应对大量长连接 / WebSocket 节点
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535

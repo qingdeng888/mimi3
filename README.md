@@ -505,28 +505,103 @@ sudo systemctl enable --now mimi3
 journalctl -u mimi3 -f
 ```
 
-### Docker（自行构建）
+### Docker / Docker Compose（推荐）
 
-仓库未提供官方 Dockerfile，可参考：
+仓库已自带 `Dockerfile`、`docker-compose.yml`、`.dockerignore`，可一键起服务。
 
-```dockerfile
-FROM python:3.11-slim
-WORKDIR /app
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-COPY . .
-EXPOSE 8000
-CMD ["python", "main.py"]
-```
+#### 一键启动
 
 ```bash
-docker build -t mimi3 .
+# 1. 准备 .env（至少填好 WS_TUNNEL_URL 和 MIMO_RELAY_OPENAI_KEY）
+cp env.example .env
+vim .env
+
+# 2. 准备持久化目录
+mkdir -p users logs data
+
+# 3. 构建并后台启动
+docker compose up -d --build
+
+# 4. 查看日志
+docker compose logs -f mimi3
+```
+
+启动后：
+
+- 控制面板：`http://<宿主机 IP>:8000/webui`
+- API 基址：`http://<宿主机 IP>:8000/v1`、`http://<宿主机 IP>:8000/anthropic/v1`
+
+#### 镜像内置默认行为
+
+| 项 | 容器内路径 / 值 | 说明 |
+| --- | --- | --- |
+| 工作目录 | `/app` | 项目代码 |
+| 监听端口 | `8000` | 由 `SERVER_PORT` 覆盖 |
+| 时区 | `Asia/Shanghai` | 通过 `tzdata` |
+| `MIMO_METRICS_DB_PATH` | `/app/data/gateway_metrics.db` | SQLite 指标库 |
+| `MIMO_METRICS_SNAPSHOT_PATH` | `/app/data/gateway_snapshot.json` | 内存指标快照 |
+| `MIMO_PROCESS_LOCK_PATH` | `/app/data/mimo2api.lock` | 单进程锁 |
+| 健康检查 | `GET /api/auth/session` | 30s 间隔，3 次失败标记 unhealthy |
+| PID 1 | `tini` | 让 SIGTERM/SIGINT 干净地传递给 Python |
+
+#### 持久化卷映射
+
+`docker-compose.yml` 已把以下目录/文件 bind 挂载到宿主机当前目录：
+
+| 宿主机 | 容器内 | 用途 |
+| --- | --- | --- |
+| `./users` | `/app/users` | 账号池（每账号一个 JSON），删除容器不丢账号 |
+| `./logs` | `/app/logs` | gateway.log 滚动日志 |
+| `./data` | `/app/data` | 指标 SQLite + 快照 + 进程锁 |
+| `./model_mapping.json` | `/app/model_mapping.json` | 模型映射，可在 WebUI 实时编辑 |
+
+> ⚠️ `./model_mapping.json` 是单文件挂载，**首次启动前宿主机必须存在该文件**。直接克隆本仓库即可（仓库已自带）。如果你是干净环境，先 `cp env.example .env` 后还需 `touch model_mapping.json && echo '{}' > model_mapping.json`。
+
+#### 反向代理 / WSS 场景
+
+若使用 Nginx + HTTPS 终止，把 `WS_TUNNEL_URL` 改成 `wss://your-domain.com/ws`，并把 compose 里的端口收到 `127.0.0.1`：
+
+```yaml
+ports:
+  - "127.0.0.1:8000:8000"
+```
+
+然后由宿主机的 Nginx 反代到 `127.0.0.1:8000`（参考上面 [Nginx 示例](#反向代理-nginx-示例)）。
+
+#### 常用运维命令
+
+```bash
+# 重启
+docker compose restart mimi3
+
+# 应用更新（拉取最新代码后重新构建）
+git pull
+docker compose up -d --build
+
+# 查看实时日志
+docker compose logs -f --tail=200 mimi3
+
+# 进入容器内排查
+docker compose exec mimi3 bash
+
+# 停止 & 移除（数据保留在宿主机 ./users ./logs ./data）
+docker compose down
+```
+
+#### 自行构建（不使用 compose）
+
+```bash
+docker build -t mimi3:latest .
+
 docker run -d --name mimi3 \
+  --restart unless-stopped \
   -p 8000:8000 \
+  --env-file .env \
   -v $(pwd)/users:/app/users \
   -v $(pwd)/logs:/app/logs \
-  --env-file .env \
-  mimi3
+  -v $(pwd)/data:/app/data \
+  -v $(pwd)/model_mapping.json:/app/model_mapping.json \
+  mimi3:latest
 ```
 
 ---
@@ -575,9 +650,13 @@ mimi3/
 ├── requirements.txt
 ├── env.example                   # 环境变量模板
 ├── model_mapping.json            # 客户端模型名 -> MiMo 模型 ID 映射
+├── Dockerfile                    # 容器镜像构建
+├── docker-compose.yml            # 一键编排（含卷挂载、健康检查）
+├── .dockerignore                 # 镜像构建排除项
 ├── users/                        # 账号目录，每个账号一个 user_<uid>.json
 │   └── .gitkeep
 ├── logs/                         # 运行日志（首次运行后自动创建）
+├── data/                         # Docker 部署时的持久化目录（指标库/快照/锁）
 └── mimo2api/
     ├── web_service.py            # FastAPI 主服务，所有 /v1 /anthropic 路由
     ├── manager.py                # 多账号 Claw 生命周期管理 + 桥接注入

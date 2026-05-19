@@ -1,0 +1,51 @@
+# --- VCS / 编辑器 ---
+.git
+.gitignore
+.gitattributes
+.vscode
+.idea
+.kiro
+
+# --- Python 缓存 ---
+__pycache__
+*.py[cod]
+*$py.class
+*.egg-info
+.pytest_cache
+.mypy_cache
+.ruff_cache
+
+# --- 虚拟环境 ---
+.venv
+venv
+env
+
+# --- 本地配置（敏感）---
+.env
+.env.*
+!.env.example
+
+# --- 运行时产物（应通过 volume 持久化，而不是打进镜像）---
+logs
+*.log
+gateway_metrics.db
+gateway_metrics.db-shm
+gateway_metrics.db-wal
+gateway_snapshot.json
+mimo2api.lock
+app_state.json
+claw_users.json
+oc_history.json
+
+# --- 账号文件不进镜像，避免泄漏 Cookie ---
+users/*.json
+!users/.gitkeep
+
+# --- 其他 ---
+archive/
+status_page/
+.ai_memory/
+*.sh
+Dockerfile
+docker-compose.yml
+.dockerignore
