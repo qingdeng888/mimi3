@@ -104,7 +104,7 @@ async def fetch_user_status(data: dict) -> dict:
         "User-Agent": "Mozilla/5.0"
     }
     try:
-        async with httpx.AsyncClient() as c:
+        async with httpx.AsyncClient(proxy=os.getenv("MIMO_PROXY_URL", "").strip() or None, timeout=5) as c:
             r = await c.get(url, cookies=cookies, headers=headers, timeout=5)
             if r.status_code == 401:
                 return {**data, "claw_status": "EXPIRED(401)", "remain_sec": 0}
@@ -207,7 +207,7 @@ async def api_users_recreate(uid: str):
     }
     base = "https://aistudio.xiaomimimo.com"
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(proxy=os.getenv("MIMO_PROXY_URL", "").strip() or None) as client:
         # 0. 签署用户协议（首次创建必须，后续调也无副作用）
         try:
             agree_url = f"{base}/open-apis/agreement/user/mimo-claw?xiaomichatbot_ph={quote(ph)}"

@@ -143,6 +143,7 @@ python main.py
 | `MIMO_WEBUI_COOKIE_NAME` | 否 | `mimo_webui_session` | Cookie 名。 |
 | `MIMO_NODE_401_COOLDOWN_SECONDS` | 否 | `900` | 节点返回 401 时的冷却时长。 |
 | `MIMO_PROCESS_LOCK_PATH` | 否 | `项目目录/mimo2api.lock` | 单进程锁文件路径，避免重复启动同一份网关。 |
+| `MIMO_PROXY_URL` | 否 | 空 | 代理地址，**仅用于 Claw 创建/销毁/状态查询**请求（不影响客户端 API 转发）。支持 HTTP / HTTPS / SOCKS5。格式：`http://ip:port`、`socks5://user:pass@ip:port`。留空 = 不走代理。 |
 
 `.env` 模板示例：
 
@@ -156,6 +157,35 @@ MIMO_WEBUI_USERNAME=admin
 MIMO_WEBUI_PASSWORD=change-me
 MIMO_WEBUI_SECRET=replace-with-a-long-random-string
 ```
+
+### 代理配置（可选）
+
+如果你的服务器不在中国大陆，Claw 容器的创建/销毁可能不稳定。通过 `MIMO_PROXY_URL` 可以让这些请求走中国 IP 的代理，而**不影响**客户端 API 转发和 WebSocket 隧道。
+
+```dotenv
+# HTTP 代理（无密码）
+MIMO_PROXY_URL=http://1.2.3.4:7890
+
+# HTTP 代理（有密码）
+MIMO_PROXY_URL=http://user:password@1.2.3.4:7890
+
+# SOCKS5 代理（无密码）
+MIMO_PROXY_URL=socks5://1.2.3.4:1080
+
+# SOCKS5 代理（有密码）
+MIMO_PROXY_URL=socks5://user:password@1.2.3.4:1080
+```
+
+> **作用范围**：仅对以下请求生效（均为 `aistudio.xiaomimimo.com` 的 Claw 管理 API）：
+> - 签署协议 (`/open-apis/agreement/...`)
+> - 创建实例 (`/open-apis/user/mimo-claw/create`)
+> - 销毁实例 (`/open-apis/user/mimo-claw/destroy`)
+> - 查询状态 (`/open-apis/user/mimo-claw/status`)
+> - 获取 Ticket (`/open-apis/user/ws/ticket`)
+>
+> **不走代理**的部分：客户端的 `/v1/*`、`/anthropic/v1/*` API 转发，以及 Claw 容器反向连接到 `/ws` 的 WebSocket 隧道。
+
+> **SOCKS5 依赖**：使用 SOCKS5 代理需要安装 `socksio`，项目 `requirements.txt` 已包含 `httpx[socks]`，会自动安装。
 
 ---
 
