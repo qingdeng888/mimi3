@@ -14,7 +14,7 @@ load_dotenv()
 
 # ================= 统一全局配置（优先读 .env，有默认值兜底） =================
 SERVER_HOST = os.getenv("SERVER_HOST", "0.0.0.0")
-SERVER_PORT = int(os.getenv("SERVER_PORT", "8000"))
+SERVER_PORT = int(os.getenv("SERVER_PORT", "18000"))
 WS_TUNNEL_URL = os.getenv("WS_TUNNEL_URL", f"ws://{SERVER_HOST}:{SERVER_PORT}/ws")
 # ================================================
 
