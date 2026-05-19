@@ -119,6 +119,8 @@ async def fetch_user_status(data: dict) -> dict:
 
 @router.get("/api/users/list")
 async def api_users_list():
+    from .manager import load_disabled_accounts
+
     raw_users = []
     if os.path.exists(USERS_DIR):
         for fn in os.listdir(USERS_DIR):
@@ -133,14 +135,22 @@ async def api_users_list():
     tasks = [fetch_user_status(rd) for rd in raw_users]
     results = await asyncio.gather(*tasks) if raw_users else []
 
+    disabled = load_disabled_accounts()
+
     users = []
     for data in results:
+        uid = data.get("userId", "")
+        disabled_info = disabled.get(str(uid))
         users.append({
-            "userId": data.get("userId"),
+            "userId": uid,
             "name": data.get("name"),
             "serviceToken": data.get("serviceToken"),
             "claw_status": data.get("claw_status", "UNKNOWN"),
-            "remain_sec": data.get("remain_sec", 0)
+            "remain_sec": data.get("remain_sec", 0),
+            "disabled": disabled_info is not None,
+            "disabled_reason": disabled_info.get("reason") if disabled_info else None,
+            "disabled_at": disabled_info.get("disabled_at") if disabled_info else None,
+            "disabled_auto": disabled_info.get("auto", False) if disabled_info else False,
         })
     return JSONResponse({"users": users})
 
@@ -271,6 +281,64 @@ async def api_users_delete(uid: str):
         os.remove(target_file)
         return JSONResponse({"status": "ok"})
     return JSONResponse({"detail": "User not found"}, status_code=404)
+
+
+@router.post("/api/users/disable/{uid}")
+async def api_users_disable(uid: str):
+    """手动禁用账号：标记禁用 + 触发销毁 mimo-claw"""
+    from urllib.parse import quote
+    from .manager import disable_account, is_account_disabled, make_claw_action_http_client
+
+    target_file = os.path.join(USERS_DIR, f"user_{uid}.json")
+    if not os.path.exists(target_file):
+        return JSONResponse({"detail": "User not found"}, status_code=404)
+
+    if is_account_disabled(uid):
+        return JSONResponse({"status": "ok", "message": "该账号已处于禁用状态"})
+
+    # 标记禁用
+    disable_account(uid, reason="WebUI 手动禁用", auto=False)
+
+    # 尝试销毁该账号的 mimo-claw 实例
+    try:
+        with open(target_file, "r", encoding="utf-8") as f:
+            user_data = json.load(f)
+        ph = user_data.get("xiaomichatbot_ph", "")
+        cookies = {
+            "serviceToken": user_data.get("serviceToken", ""),
+            "userId": user_data.get("userId", ""),
+            "xiaomichatbot_ph": ph,
+        }
+        headers = {
+            "Accept": "*/*",
+            "Content-Type": "application/json",
+            "Origin": "https://aistudio.xiaomimimo.com",
+            "Referer": "https://aistudio.xiaomimimo.com/",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        }
+        destroy_url = f"https://aistudio.xiaomimimo.com/open-apis/user/mimo-claw/destroy?xiaomichatbot_ph={quote(ph)}"
+        async with await make_claw_action_http_client(timeout=15) as client:
+            await client.post(destroy_url, cookies=cookies, headers=headers, timeout=15)
+    except Exception:
+        pass  # 销毁失败不影响禁用状态
+
+    return JSONResponse({"status": "ok", "message": f"账号 {uid} 已禁用，Claw 实例已触发销毁"})
+
+
+@router.post("/api/users/enable/{uid}")
+async def api_users_enable(uid: str):
+    """解除禁用账号：移除禁用标记，下一轮热加载会自动拉起任务"""
+    from .manager import enable_account, is_account_disabled
+
+    target_file = os.path.join(USERS_DIR, f"user_{uid}.json")
+    if not os.path.exists(target_file):
+        return JSONResponse({"detail": "User not found"}, status_code=404)
+
+    if not is_account_disabled(uid):
+        return JSONResponse({"status": "ok", "message": "该账号未被禁用"})
+
+    enable_account(uid)
+    return JSONResponse({"status": "ok", "message": f"账号 {uid} 已启用，将在数秒内自动拉起生命周期任务"})
 
 
 # ----------------- 代理配置 API -----------------

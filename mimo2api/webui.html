@@ -571,12 +571,23 @@
                 const tbody = document.getElementById('usersBody');
                 
                 if (data.users && data.users.length > 0) {
-                    tbody.innerHTML = data.users.map(u => `
-                        <tr>
-                            <td><strong style="color:var(--primary)">${u.userId}</strong></td>
+                    tbody.innerHTML = data.users.map(u => {
+                        const isDisabled = u.disabled;
+                        const rowOpacity = isDisabled ? 'opacity: 0.55;' : '';
+                        const statusColor = u.claw_status === 'AVAILABLE' ? '#10B981' : (u.claw_status === 'EXPIRED(401)' ? '#EF4444' : '#F59E0B');
+                        const disabledBadge = isDisabled
+                            ? `<div style="margin-top:4px;"><span style="background:#fef2f2; color:#DC2626; padding:2px 8px; border-radius:6px; font-size:11px; font-weight:600;">已禁用</span>
+                               <div style="font-size:11px; color:var(--text-muted); margin-top:2px;" title="${u.disabled_reason || ''}">${u.disabled_auto ? '(自动)' : '(手动)'} ${u.disabled_reason || ''}</div></div>`
+                            : '';
+                        const disableBtn = isDisabled
+                            ? `<button class="btn" style="background:#10B981; margin-right:6px; font-size:12px; padding:6px 12px;" onclick="enableUser('${u.userId}')">启用</button>`
+                            : `<button class="btn" style="background:#9CA3AF; margin-right:6px; font-size:12px; padding:6px 12px;" onclick="disableUser('${u.userId}')">禁用</button>`;
+                        return `
+                        <tr style="${rowOpacity}">
+                            <td><strong style="color:var(--primary)">${u.userId}</strong>${disabledBadge}</td>
                             <td>${u.name || '(未命名)'}</td>
                             <td>
-                                <div><strong style="color: ${u.claw_status === 'AVAILABLE' ? '#10B981' : (u.claw_status === 'EXPIRED(401)' ? '#EF4444' : '#F59E0B')}">${u.claw_status || '未知'}</strong></div>
+                                <div><strong style="color: ${statusColor}">${u.claw_status || '未知'}</strong></div>
                                 <div class="countdown-text" data-remain="${u.remain_sec}" style="font-size: 12px; color: var(--text-muted); margin-top: 4px;">
                                     ${u.remain_sec > 0 ? '剩余: ' + Math.floor(u.remain_sec / 60) + ' 分 ' + (u.remain_sec % 60) + ' 秒' : '已过期/无环境'}
                                 </div>
@@ -587,11 +598,12 @@
                                 </span>
                             </td>
                             <td>
-                                <button class="btn btn-primary" onclick="recreateUser('${u.userId}')" style="margin-right:6px">重建</button>
-                                <button class="btn btn-danger" onclick="deleteUser('${u.userId}')">删除</button>
+                                ${disableBtn}
+                                <button class="btn btn-primary" onclick="recreateUser('${u.userId}')" style="margin-right:6px; font-size:12px; padding:6px 12px;" ${isDisabled ? 'disabled title="请先启用"' : ''}>重建</button>
+                                <button class="btn btn-danger" onclick="deleteUser('${u.userId}')" style="font-size:12px; padding:6px 12px;">删除</button>
                             </td>
-                        </tr>
-                    `).join('');
+                        </tr>`;
+                    }).join('');
                 } else {
                     tbody.innerHTML = '<tr><td colspan="5" class="empty-state">当前未加载任何凭证</td></tr>';
                 }
@@ -599,6 +611,38 @@
                 if (e.message !== 'UNAUTHORIZED') {
                     console.error("加载用户列表失败", e);
                 }
+            }
+        }
+
+        async function disableUser(uid) {
+            if(!confirm(`确定要禁用账号 ${uid} 吗？\n禁用后将立即销毁该账号的 Claw 实例，并停止自动重建。\n如需恢复可随时点击「启用」。`)) return;
+            try {
+                const res = await apiFetch(`/api/users/disable/${uid}`, {method: 'POST'});
+                const data = await res.json();
+                if(res.ok) {
+                    showToast(data.message || '已禁用');
+                    fetchUsers();
+                } else {
+                    showToast(`禁用失败: ${data.detail || '未知错误'}`, 'error');
+                }
+            } catch(e) {
+                if (e.message !== 'UNAUTHORIZED') showToast('请求异常', 'error');
+            }
+        }
+
+        async function enableUser(uid) {
+            if(!confirm(`确定要启用账号 ${uid} 吗？\n启用后将在数秒内自动开始创建 Claw 环境。`)) return;
+            try {
+                const res = await apiFetch(`/api/users/enable/${uid}`, {method: 'POST'});
+                const data = await res.json();
+                if(res.ok) {
+                    showToast(data.message || '已启用');
+                    fetchUsers();
+                } else {
+                    showToast(`启用失败: ${data.detail || '未知错误'}`, 'error');
+                }
+            } catch(e) {
+                if (e.message !== 'UNAUTHORIZED') showToast('请求异常', 'error');
             }
         }
 
