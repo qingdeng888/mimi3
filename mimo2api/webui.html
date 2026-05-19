@@ -555,6 +555,7 @@
                                 </span>
                             </td>
                             <td>
+                                <button class="btn btn-primary" onclick="recreateUser('${u.userId}')" style="margin-right:6px">重建</button>
                                 <button class="btn btn-danger" onclick="deleteUser('${u.userId}')">删除</button>
                             </td>
                         </tr>
@@ -565,6 +566,25 @@
             } catch(e) {
                 if (e.message !== 'UNAUTHORIZED') {
                     console.error("加载用户列表失败", e);
+                }
+            }
+        }
+
+        async function recreateUser(uid) {
+            if(!confirm(`确定要对账号 ${uid} 执行「销毁 + 重建」操作？\n这将销毁当前容器并尝试创建新环境（约需 30-60 秒）。`)) return;
+            showToast(`正在为 ${uid} 重建环境，请稍候...`);
+            try {
+                const res = await apiFetch(`/api/users/recreate/${uid}`, {method: 'POST'});
+                const data = await res.json();
+                if(res.ok) {
+                    showToast(`${uid} 环境重建成功！`);
+                    fetchUsers();
+                } else {
+                    showToast(`重建失败: ${data.detail || '未知错误'}`, 'error');
+                }
+            } catch(e) {
+                if (e.message !== 'UNAUTHORIZED') {
+                    showToast('重建请求异常: ' + e.message, 'error');
                 }
             }
         }
