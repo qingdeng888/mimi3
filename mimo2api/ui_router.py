@@ -202,11 +202,19 @@ async def api_users_recreate(uid: str):
         "Content-Type": "application/json",
         "Origin": "https://aistudio.xiaomimimo.com",
         "Referer": "https://aistudio.xiaomimimo.com/",
-        "User-Agent": "Mozilla/5.0",
+        "x-timezone": "Asia/Shanghai",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     }
     base = "https://aistudio.xiaomimimo.com"
 
     async with httpx.AsyncClient() as client:
+        # 0. 签署用户协议（首次创建必须，后续调也无副作用）
+        try:
+            agree_url = f"{base}/open-apis/agreement/user/mimo-claw?xiaomichatbot_ph={quote(ph)}"
+            await client.post(agree_url, cookies=cookies, headers=headers, timeout=15)
+        except Exception:
+            pass
+
         # 1. 销毁旧实例
         try:
             destroy_url = f"{base}/open-apis/user/mimo-claw/destroy?xiaomichatbot_ph={quote(ph)}"
