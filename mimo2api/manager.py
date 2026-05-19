@@ -129,25 +129,100 @@ def _parse_xiequ_response(text: str) -> str | None:
     return None
 
 
-async def fetch_xiequ_proxy(timeout: float = 10.0) -> str | None:
+async def fetch_xiequ_proxy(timeout: float = 15.0) -> tuple[str | None, str | None]:
     """从携趣 IP API 实时提取一条短效 HTTP 代理（≈30 秒有效）。
 
-    成功返回形如 ``http://ip:port`` 的代理串；未配置 / 拉取失败 / 解析失败返回 None。
-    调用方使用完毕后让 client 自然关闭即视为"丢弃"，不需要主动释放。
+    返回 ``(proxy, error)``：成功时 proxy 形如 ``http://ip:port`` 且 error 为 None；
+    失败时 proxy 为 None，error 为可读的失败原因（供 WebUI 测试按钮回显）。
+
+    设计要点：
+      - 显式 ``trust_env=False``：忽略 HTTP_PROXY/HTTPS_PROXY 等环境变量，
+        保证从本机直连 api.xiequ.cn（你已为本机 IP 设了白名单）。
+      - 主动 IPv4 解析：避免容器/宿主机 IPv6 黑洞导致 "All connection attempts failed"。
+      - 带 User-Agent：携趣等 CN API 偶尔拒绝空 UA。
     """
     api_url = _get_xiequ_api_url()
     if not api_url:
-        return None
+        return None, "未配置携趣 API 地址"
+
+    # 1) 主动把 host 解析成 IPv4，并用 IPv4 直连发请求
+    from urllib.parse import urlparse, urlunparse
+    import socket
+
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            r = await client.get(api_url)
-            if r.status_code != 200:
-                logger.warning(f"携趣 API HTTP {r.status_code}: {r.text[:200]}")
-                return None
-            return _parse_xiequ_response(r.text)
+        parsed = urlparse(api_url)
     except Exception as e:
-        logger.error(f"携趣 API 拉取代理异常: {e}")
-        return None
+        return None, f"携趣 API URL 解析失败: {e}"
+    host = parsed.hostname
+    if not host:
+        return None, "携趣 API URL 缺少 host"
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (mimi3/mimo2api xiequ-fetcher) httpx",
+        "Accept": "*/*",
+    }
+
+    # 解析 IPv4
+    resolved_ipv4: list[str] = []
+    try:
+        infos = await asyncio.to_thread(socket.getaddrinfo, host, None, socket.AF_INET, socket.SOCK_STREAM)
+        resolved_ipv4 = sorted({ai[4][0] for ai in infos})
+    except Exception as e:
+        logger.warning(f"携趣 API DNS(IPv4) 解析失败 host={host}: {e!r}")
+
+    async def _do_request(target_url: str, host_header: str | None = None) -> tuple[str | None, str | None]:
+        try:
+            async with httpx.AsyncClient(
+                timeout=timeout,
+                trust_env=False,
+                follow_redirects=True,
+            ) as client:
+                req_headers = dict(headers)
+                if host_header:
+                    req_headers["Host"] = host_header
+                r = await client.get(target_url, headers=req_headers)
+                if r.status_code != 200:
+                    snippet = r.text[:200].replace("\n", " ")
+                    return None, f"HTTP {r.status_code}: {snippet}"
+                proxy = _parse_xiequ_response(r.text)
+                if proxy:
+                    return proxy, None
+                snippet = r.text[:200].replace("\n", " ")
+                return None, f"返回内容无法解析为 ip:port: {snippet}"
+        except Exception as ex:
+            return None, f"{type(ex).__name__}: {ex}"
+
+    last_err: str | None = None
+
+    # 优先按原始 URL 直连（让 httpx 走 system getaddrinfo，多数情况能成功）
+    proxy, err = await _do_request(api_url)
+    if proxy:
+        return proxy, None
+    last_err = err
+
+    # 失败 → 尝试用解析出来的 IPv4 一个个连接（绕过 v6 黑洞 / DNS 怪异）
+    if resolved_ipv4 and parsed.scheme in ("http", "https"):
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        for ip in resolved_ipv4:
+            ip_url = urlunparse((
+                parsed.scheme,
+                f"{ip}:{port}",
+                parsed.path or "/",
+                parsed.params,
+                parsed.query,
+                parsed.fragment,
+            ))
+            logger.info(f"[携趣] 直连 URL 失败，重试 IPv4 直连 {ip}:{port} ...")
+            proxy, err = await _do_request(ip_url, host_header=host)
+            if proxy:
+                return proxy, None
+            last_err = err
+
+    detail = last_err or "未知错误"
+    if resolved_ipv4:
+        detail += f"（已尝试 IPv4: {','.join(resolved_ipv4)}）"
+    logger.error(f"携趣 API 拉取代理失败 url={api_url} reason={detail}")
+    return None, detail
 
 
 async def _acquire_action_proxy() -> str | None:
@@ -156,11 +231,11 @@ async def _acquire_action_proxy() -> str | None:
       - 否则       → 退化为 _get_proxy_url() 的静态代理（环境变量 / proxy_config.json）
     """
     if _get_xiequ_api_url():
-        proxy = await fetch_xiequ_proxy()
+        proxy, err = await fetch_xiequ_proxy()
         if proxy:
             logger.info(f"🔁 [携趣] 已提取短效 HTTP 代理: {proxy}")
             return proxy
-        logger.warning("⚠️ [携趣] 提取代理失败，本次动作回退为静态代理 / 直连")
+        logger.warning(f"⚠️ [携趣] 提取代理失败({err})，本次动作回退为静态代理 / 直连")
     return _get_proxy_url()
 
 
