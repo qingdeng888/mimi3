@@ -390,7 +390,10 @@ async def api_test_xiequ():
     if not _get_xiequ_api_url():
         return JSONResponse({"detail": "尚未配置携趣 API 地址"}, status_code=400)
 
-    proxy = await fetch_xiequ_proxy()
+    proxy, err = await fetch_xiequ_proxy()
     if not proxy:
-        return JSONResponse({"detail": "提取失败：API 返回为空 / 解析失败 / 网络异常，请查看后端日志"}, status_code=502)
+        return JSONResponse(
+            {"detail": f"提取失败: {err or '未知错误，请查看后端日志'}"},
+            status_code=502,
+        )
     return JSONResponse({"status": "ok", "proxy": proxy, "message": f"成功提取一条短效代理: {proxy}"})
