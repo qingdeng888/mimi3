@@ -11,6 +11,7 @@ mimo2api 多账号生命周期管理与守护 (Manager)
 
 import sys
 import os
+import re
 import json
 import time
 import asyncio
@@ -63,9 +64,119 @@ def _get_proxy_url() -> str | None:
     return os.getenv("MIMO_PROXY_URL", "").strip() or None
 
 
+# ----------------- 携趣 IP 短效代理 -----------------
+
+XIEQU_CONFIG_FILE = os.path.join(ROOT_DIR, "xiequ_config.json")
+
+
+def _get_xiequ_api_url() -> str | None:
+    """读取携趣 IP 提取 API 地址（支持 WebUI 热加载）。
+
+    优先读 xiequ_config.json，其次读环境变量 MIMO_XIEQU_API_URL，未配置返回 None。
+    """
+    try:
+        if os.path.exists(XIEQU_CONFIG_FILE):
+            with open(XIEQU_CONFIG_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                url = (data.get("api_url") or "").strip()
+                if url:
+                    return url
+    except Exception:
+        pass
+    return os.getenv("MIMO_XIEQU_API_URL", "").strip() or None
+
+
+_IP_PORT_RE = re.compile(r"(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}):(\d{1,5})")
+
+
+def _parse_xiequ_response(text: str) -> str | None:
+    """从携趣 API 返回内容中解析出第一条 ip:port，组装成 http:// 代理串。
+
+    支持两种常见格式：
+      1. 纯文本："1.2.3.4:5678" 或多行/逗号分隔
+      2. JSON：  {"code":0,"data":[{"ip":"1.2.3.4","port":5678}]} 等
+    """
+    text = (text or "").strip()
+    if not text:
+        return None
+
+    # 先尝试 JSON
+    try:
+        data = json.loads(text)
+        if isinstance(data, dict):
+            # 错误码兜底：非 0 / 非 200 视为业务错误
+            code = data.get("code")
+            if code is not None and str(code) not in ("0", "200"):
+                logger.warning(f"携趣 API 业务错误码 code={code}, msg={data.get('msg') or data.get('message')}")
+                # 仍尝试在原文里抓一次 ip:port，部分 API 即便 code!=0 也可能返回数据
+            items = data.get("data") or data.get("list") or []
+            if isinstance(items, list) and items:
+                item = items[0]
+                if isinstance(item, dict):
+                    ip = item.get("ip") or item.get("IP")
+                    port = item.get("port") or item.get("Port")
+                    if ip and port:
+                        return f"http://{ip}:{port}"
+    except Exception:
+        pass
+
+    # 兜底：正则抓第一个 ip:port
+    m = _IP_PORT_RE.search(text)
+    if m:
+        return f"http://{m.group(1)}:{m.group(2)}"
+
+    logger.warning(f"携趣 API 返回内容无法解析为 ip:port: {text[:200]}")
+    return None
+
+
+async def fetch_xiequ_proxy(timeout: float = 10.0) -> str | None:
+    """从携趣 IP API 实时提取一条短效 HTTP 代理（≈30 秒有效）。
+
+    成功返回形如 ``http://ip:port`` 的代理串；未配置 / 拉取失败 / 解析失败返回 None。
+    调用方使用完毕后让 client 自然关闭即视为"丢弃"，不需要主动释放。
+    """
+    api_url = _get_xiequ_api_url()
+    if not api_url:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            r = await client.get(api_url)
+            if r.status_code != 200:
+                logger.warning(f"携趣 API HTTP {r.status_code}: {r.text[:200]}")
+                return None
+            return _parse_xiequ_response(r.text)
+    except Exception as e:
+        logger.error(f"携趣 API 拉取代理异常: {e}")
+        return None
+
+
+async def _acquire_action_proxy() -> str | None:
+    """为单次创建/销毁"动作"获取代理：
+      - 已配置携趣 → 实时拉一条短效代理（≈30 秒），用完即丢
+      - 否则       → 退化为 _get_proxy_url() 的静态代理（环境变量 / proxy_config.json）
+    """
+    if _get_xiequ_api_url():
+        proxy = await fetch_xiequ_proxy()
+        if proxy:
+            logger.info(f"🔁 [携趣] 已提取短效 HTTP 代理: {proxy}")
+            return proxy
+        logger.warning("⚠️ [携趣] 提取代理失败，本次动作回退为静态代理 / 直连")
+    return _get_proxy_url()
+
+
 def _make_claw_http_client(timeout: int = 30) -> httpx.AsyncClient:
-    """创建用于 Claw API 调用的 httpx 客户端（带可选代理）"""
+    """创建用于 Claw 状态查询等"非动作"请求的 httpx 客户端（仅使用静态代理）"""
     proxy = _get_proxy_url()
+    return httpx.AsyncClient(proxy=proxy, timeout=timeout)
+
+
+async def make_claw_action_http_client(timeout: int = 30) -> httpx.AsyncClient:
+    """创建用于 Claw 创建 / 销毁等"动作"请求的 httpx 客户端。
+
+    若配置了携趣 API，会实时拉一条短效 HTTP 代理装配进 client；否则回退静态代理。
+    用法: ``async with await make_claw_action_http_client() as client: ...``
+    """
+    proxy = await _acquire_action_proxy()
     return httpx.AsyncClient(proxy=proxy, timeout=timeout)
 
 # ----------------- 用户加载逻辑 (遵循 web_core.py 原版逻辑) -----------------
@@ -130,46 +241,58 @@ class NativeClawClient:
         self.session_key = "agent:main:main"
         
     async def destroy_claw(self) -> bool:
-        """异步请求主机的接口对容器实施销毁"""
+        """异步请求主机的接口对容器实施销毁
+
+        销毁动作本身使用「携趣短效代理」（若配置）；销毁后的状态二次确认走静态代理 / 直连，
+        避免短效代理 30 秒到期后干扰非关键的状态查询。
+        """
         url = f"{BASE_URL}/open-apis/user/mimo-claw/destroy?xiaomichatbot_ph={quote(self.ph)}"
         c_copy = dict(self.cookies)
         c_copy['xiaomichatbot_ph'] = self.ph
         try:
-            async with _make_claw_http_client(timeout=30) as client:
+            # Step 1：用携趣短效代理执行真正的销毁 POST，用完即关闭丢弃
+            async with await make_claw_action_http_client(timeout=30) as client:
                 r = await client.post(url, cookies=c_copy, headers=_aistudio_headers(), timeout=30)
                 data = r.json()
                 if data.get("code") == 0:
                     self.logger.info(f"销毁请求发送成功: {data.get('data', {}).get('status')}")
-                # 无论如何等三秒后看看状态
-                await asyncio.sleep(3)
+
+            # Step 2：等三秒后做状态二次确认（与"动作"无关，不需要 Chinese IP）
+            await asyncio.sleep(3)
+            async with _make_claw_http_client(timeout=30) as client:
                 status_url = f"{BASE_URL}/open-apis/user/mimo-claw/status"
                 sr = await client.get(status_url, cookies=c_copy, headers=_aistudio_headers(), timeout=30)
                 self.logger.info(f"销毁后终态结果: {sr.json().get('data', {}).get('status')}")
-                return True
+            return True
         except Exception as e:
             self.logger.error(f"销毁 Claw 异常: {e}")
             return False
 
     async def _create_and_wait(self) -> bool:
-        """创建 Claw 实例并等待其可用"""
+        """创建 Claw 实例并等待其可用
+
+        agreement / create POST 使用「携趣短效代理」（≈30 秒有效，正好够这两个请求）；
+        随后的状态轮询（最长 120 秒）使用静态代理 / 直连，避免在轮询过程中短效代理失效。
+        """
         url_create = f"{BASE_URL}/open-apis/user/mimo-claw/create?xiaomichatbot_ph={quote(self.ph)}"
         url_status = f"{BASE_URL}/open-apis/user/mimo-claw/status"
         url_agree = f"{BASE_URL}/open-apis/agreement/user/mimo-claw?xiaomichatbot_ph={quote(self.ph)}"
-        
-        async with _make_claw_http_client(timeout=30) as client:
-            # 1. 尝试签署 agreement
+
+        # Step 1：协议签署 + 创建容器（动作）→ 携趣短效代理一次性完成
+        async with await make_claw_action_http_client(timeout=30) as client:
             try:
                 await client.post(url_agree, cookies=self.cookies, headers=_aistudio_headers(), timeout=15)
             except Exception:
                 pass
-                
-            # 2. 发起创建
+
             r = await client.post(url_create, cookies=self.cookies, headers=_aistudio_headers(), timeout=20)
             if r.status_code == 401:
                 self.logger.error("账户已过期失效 (Create 401)")
                 return False
-            
-            # 3. 轮询直到 AVAILABLE
+        # 携趣短效代理在此 with 块结束时已自然关闭/丢弃
+
+        # Step 2：状态轮询（非动作）→ 静态代理或直连
+        async with _make_claw_http_client(timeout=30) as client:
             deadline = time.time() + 120
             last_status = None
             while time.time() < deadline:

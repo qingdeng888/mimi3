@@ -14,6 +14,8 @@ app_state.json
 claw_users.json
 oc_history.json
 users/*.json
+proxy_config.json
+xiequ_config.json
 
 # 抓包归档可能含 Cookie/Token，默认不纳入版本库
 archive/http_captures/

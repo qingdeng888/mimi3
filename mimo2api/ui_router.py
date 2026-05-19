@@ -181,7 +181,7 @@ async def api_users_add(request: Request):
 async def api_users_recreate(uid: str):
     """手动触发单个账号的销毁 + 创建流程"""
     from urllib.parse import quote
-    from .manager import _get_proxy_url
+    from .manager import _get_proxy_url, make_claw_action_http_client
 
     target_file = os.path.join(USERS_DIR, f"user_{uid}.json")
     if not os.path.exists(target_file):
@@ -209,7 +209,8 @@ async def api_users_recreate(uid: str):
     }
     base = "https://aistudio.xiaomimimo.com"
 
-    async with httpx.AsyncClient(proxy=_get_proxy_url()) as client:
+    # === 动作阶段：协议签署 + 销毁 + 创建 → 一条携趣短效代理走完 ===
+    async with await make_claw_action_http_client(timeout=30) as client:
         # 0. 签署用户协议（首次创建必须，后续调也无副作用）
         try:
             agree_url = f"{base}/open-apis/agreement/user/mimo-claw?xiaomichatbot_ph={quote(ph)}"
@@ -234,6 +235,8 @@ async def api_users_recreate(uid: str):
         except Exception as e:
             return JSONResponse({"detail": f"创建请求异常: {e}"}, status_code=502)
 
+    # === 轮询阶段（非动作）：静态代理 / 直连，避免 30 秒短效代理过期 ===
+    async with httpx.AsyncClient(proxy=_get_proxy_url(), timeout=30) as client:
         # 3. 轮询等待状态（最多 60 秒）
         status_url = f"{base}/open-apis/user/mimo-claw/status"
         deadline = time.time() + 60
@@ -320,3 +323,74 @@ async def api_delete_proxy():
     if os.path.exists(PROXY_CONFIG_FILE):
         os.remove(PROXY_CONFIG_FILE)
     return JSONResponse({"status": "ok", "message": "代理已清除，将回退到环境变量或直连"})
+
+
+# ----------------- 携趣 IP 短效代理 API -----------------
+
+XIEQU_CONFIG_FILE = os.path.join(ROOT_DIR, "xiequ_config.json")
+
+
+@router.get("/api/xiequ")
+async def api_get_xiequ():
+    """读取当前携趣 API 配置"""
+    api_url = ""
+    source = "none"
+    if os.path.exists(XIEQU_CONFIG_FILE):
+        try:
+            with open(XIEQU_CONFIG_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                api_url = (data.get("api_url") or "").strip()
+                if api_url:
+                    source = "webui"
+        except Exception:
+            pass
+    if not api_url:
+        api_url = os.getenv("MIMO_XIEQU_API_URL", "").strip()
+        if api_url:
+            source = "env"
+    return JSONResponse({"api_url": api_url, "source": source, "enabled": bool(api_url)})
+
+
+@router.put("/api/xiequ")
+async def api_set_xiequ(request: Request):
+    """设置携趣 API 提取地址（写入 xiequ_config.json，立即热生效）"""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"detail": "请求体不是合法 JSON"}, status_code=400)
+
+    api_url = str(body.get("api_url", "")).strip()
+    if api_url and not api_url.startswith(("http://", "https://")):
+        return JSONResponse({"detail": "携趣 API 地址需以 http:// 或 https:// 开头"}, status_code=400)
+
+    with open(XIEQU_CONFIG_FILE, "w", encoding="utf-8") as f:
+        json.dump({"api_url": api_url}, f, ensure_ascii=False, indent=2)
+
+    return JSONResponse({
+        "status": "ok",
+        "api_url": api_url,
+        "enabled": bool(api_url),
+        "message": "携趣 API 已保存，下次创建/销毁动作即时生效",
+    })
+
+
+@router.delete("/api/xiequ")
+async def api_delete_xiequ():
+    """清除携趣 API 配置（删除 xiequ_config.json，回退到环境变量或不启用）"""
+    if os.path.exists(XIEQU_CONFIG_FILE):
+        os.remove(XIEQU_CONFIG_FILE)
+    return JSONResponse({"status": "ok", "message": "携趣 API 已清除，创建/销毁将回退到静态代理 / 直连"})
+
+
+@router.post("/api/xiequ/test")
+async def api_test_xiequ():
+    """实时调用携趣 API 测试一次提取，返回拿到的 ip:port（不会缓存）"""
+    from .manager import fetch_xiequ_proxy, _get_xiequ_api_url
+
+    if not _get_xiequ_api_url():
+        return JSONResponse({"detail": "尚未配置携趣 API 地址"}, status_code=400)
+
+    proxy = await fetch_xiequ_proxy()
+    if not proxy:
+        return JSONResponse({"detail": "提取失败：API 返回为空 / 解析失败 / 网络异常，请查看后端日志"}, status_code=502)
+    return JSONResponse({"status": "ok", "proxy": proxy, "message": f"成功提取一条短效代理: {proxy}"})
