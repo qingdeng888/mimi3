@@ -45,7 +45,21 @@ WS_URL = "wss://aistudio.xiaomimimo.com/ws/proxy"
 
 
 def _get_proxy_url() -> str | None:
-    """获取代理地址，仅用于 Claw 创建/销毁/状态查询请求"""
+    """获取代理地址，仅用于 Claw 创建/销毁/状态查询请求。
+    优先读取 proxy_config.json（WebUI 热配置），其次读环境变量 MIMO_PROXY_URL。
+    """
+    # 1. 优先从文件读取（支持 WebUI 热加载）
+    proxy_file = os.path.join(ROOT_DIR, "proxy_config.json")
+    try:
+        if os.path.exists(proxy_file):
+            with open(proxy_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                url = data.get("proxy_url", "").strip()
+                if url:
+                    return url
+    except Exception:
+        pass
+    # 2. 降级到环境变量
     return os.getenv("MIMO_PROXY_URL", "").strip() or None
 
 

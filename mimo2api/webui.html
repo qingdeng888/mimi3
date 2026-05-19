@@ -395,6 +395,20 @@
             </div>
         </div>
 
+        <!-- 代理配置卡片 -->
+        <div class="glass-card">
+            <div class="flex-between">
+                <h2 style="margin: 0; font-size: 18px;">代理配置（Claw 创建/销毁）</h2>
+                <span id="proxySource" class="badge" style="font-size:11px;">未加载</span>
+            </div>
+            <div style="display:flex; gap:10px; margin-top:14px; align-items:center; flex-wrap:wrap;">
+                <input id="proxyInput" class="text-input" style="flex:1; min-width:200px;" placeholder="http://ip:port 或 socks5://user:pass@ip:port（留空=直连）" />
+                <button class="btn" onclick="saveProxy()">保存</button>
+                <button class="btn btn-danger" onclick="clearProxy()">清除</button>
+            </div>
+            <div style="font-size:12px; color:var(--text-muted); margin-top:8px;">仅对 Claw 容器创建/销毁/状态查询生效，保存后立即热加载，无需重启。支持 HTTP / SOCKS5（有/无密码）。</div>
+        </div>
+
         <!-- 用户管理卡片 -->
         <div class="glass-card">
             <div class="flex-between">
@@ -684,8 +698,62 @@
             }
         }
 
+        async function fetchProxy() {
+            try {
+                const res = await apiFetch('/api/proxy');
+                const data = await res.json();
+                document.getElementById('proxyInput').value = data.proxy_url || '';
+                const srcEl = document.getElementById('proxySource');
+                if (data.source === 'webui') {
+                    srcEl.textContent = '来源: WebUI 配置';
+                    srcEl.className = 'badge';
+                } else if (data.source === 'env') {
+                    srcEl.textContent = '来源: 环境变量';
+                    srcEl.className = 'badge warn';
+                } else {
+                    srcEl.textContent = '未配置(直连)';
+                    srcEl.className = 'badge warn';
+                }
+            } catch(e) {
+                if (e.message !== 'UNAUTHORIZED') console.error("加载代理配置失败", e);
+            }
+        }
+
+        async function saveProxy() {
+            const val = document.getElementById('proxyInput').value.trim();
+            try {
+                const res = await apiFetch('/api/proxy', {
+                    method: 'PUT',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ proxy_url: val })
+                });
+                const data = await res.json();
+                if (res.ok) {
+                    showToast(val ? '代理已保存，立即生效' : '已设为直连（清空代理）');
+                    fetchProxy();
+                } else {
+                    showToast(data.detail || '保存失败', 'error');
+                }
+            } catch(e) {
+                if (e.message !== 'UNAUTHORIZED') showToast('保存请求异常', 'error');
+            }
+        }
+
+        async function clearProxy() {
+            try {
+                const res = await apiFetch('/api/proxy', {method: 'DELETE'});
+                if (res.ok) {
+                    showToast('代理配置已清除');
+                    document.getElementById('proxyInput').value = '';
+                    fetchProxy();
+                }
+            } catch(e) {
+                if (e.message !== 'UNAUTHORIZED') showToast('清除请求异常', 'error');
+            }
+        }
+
         async function initializeDashboard() {
-            await Promise.all([fetchStatus(), fetchUsers()]);
+            await Promise.all([fetchStatus(), fetchUsers(), fetchProxy()]);
             startStatusPolling();
         }
 
