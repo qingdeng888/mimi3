@@ -44,6 +44,66 @@ ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BASE_URL = "https://aistudio.xiaomimimo.com"
 WS_URL = "wss://aistudio.xiaomimimo.com/ws/proxy"
 
+# ----------------- 账号禁用状态管理 -----------------
+DISABLED_ACCOUNTS_FILE = os.path.join(ROOT_DIR, "disabled_accounts.json")
+# 自动禁用阈值：连续失败次数达到此值触发自动禁用
+AUTO_DISABLE_THRESHOLD = 5
+
+
+def load_disabled_accounts() -> dict[str, dict]:
+    """从 disabled_accounts.json 加载禁用列表。
+
+    返回 dict: uid -> {"reason": "...", "disabled_at": "...", "auto": bool}
+    文件不存在或解析失败返回空 dict。
+    """
+    try:
+        if os.path.exists(DISABLED_ACCOUNTS_FILE):
+            with open(DISABLED_ACCOUNTS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+    except Exception:
+        pass
+    return {}
+
+
+def save_disabled_accounts(data: dict[str, dict]):
+    """持久化禁用列表到 disabled_accounts.json"""
+    try:
+        with open(DISABLED_ACCOUNTS_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.error(f"保存禁用列表失败: {e}")
+
+
+def is_account_disabled(uid: str) -> bool:
+    """判断某个 uid 是否在禁用列表中（每次实时读文件，支持热加载）"""
+    return uid in load_disabled_accounts()
+
+
+def disable_account(uid: str, reason: str = "手动禁用", auto: bool = False):
+    """将 uid 加入禁用列表并持久化"""
+    from datetime import datetime
+    data = load_disabled_accounts()
+    data[str(uid)] = {
+        "reason": reason,
+        "disabled_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "auto": auto,
+    }
+    save_disabled_accounts(data)
+    logger.warning(f"🚫 账号 {uid} 已被禁用: {reason} (auto={auto})")
+
+
+def enable_account(uid: str) -> bool:
+    """将 uid 从禁用列表移除。返回是否确实存在并移除。"""
+    data = load_disabled_accounts()
+    if str(uid) in data:
+        del data[str(uid)]
+        save_disabled_accounts(data)
+        logger.info(f"✅ 账号 {uid} 已解除禁用")
+        return True
+    return False
+
 
 def _get_proxy_url() -> str | None:
     """获取代理地址，仅用于 Claw 创建/销毁/状态查询请求。
@@ -536,6 +596,8 @@ class AccountManager:
         self.logger = logging.getLogger(f"Acc-{self.name}")
         self.stagger_offset = stagger_offset
         self.is_first_round = True
+        # 连续失败计数器（创建失败 或 连接失败），达到阈值自动禁用
+        self._consecutive_failures = 0
 
     async def get_instance_status(self) -> tuple[str, int]:
         """获取当前容器的状态和剩余时间(秒)"""
@@ -569,6 +631,11 @@ class AccountManager:
     async def run_lifecycle(self):
         """核心流转逻辑"""
         while True:
+            # ---- 检查禁用状态 ----
+            if is_account_disabled(self.uid):
+                self.logger.info(f"⏸️ 账号 {self.uid} 已被禁用，生命周期任务退出。")
+                return
+
             self.logger.info("=== 启动新一轮 Claw 生命周期 (设定运行阈值 55 分钟) ===")
             client = NativeClawClient(self.ph, self.cookies, self.logger)
             try:
@@ -580,6 +647,8 @@ class AccountManager:
                 if st == "AVAILABLE" and remain_sec > 180:
                     self.logger.info(f"发现可用宿主环境！尝试直接免重启挂载接入...")
                     if await self.connect_with_retry(client, max_retries=3, delay=5, create=False):
+                        # 成功连接 → 重置失败计数
+                        self._consecutive_failures = 0
                         bridge_code = await get_bridge_code()
                         inject_prompt = (
                             "好，请检查当前环境是否有 websockets 和 httpx 依赖（如果没有请马上安装）。\n"
@@ -615,10 +684,26 @@ class AccountManager:
                 # 2. 从头 Create 且连入
                 self.logger.info("申请初始化新云端实例容器...")
                 if not await self.connect_with_retry(client, max_retries=5, delay=5, create=True):
-                    self.logger.error("全流程首次建联连结都失败，可能由于服务封禁/账户死亡。休眠 1 分钟再试...")
+                    self._consecutive_failures += 1
+                    self.logger.error(f"全流程首次建联连结都失败 (连续失败 {self._consecutive_failures}/{AUTO_DISABLE_THRESHOLD})...")
                     await client.close()
+                    # 达到阈值 → 自动禁用并销毁
+                    if self._consecutive_failures >= AUTO_DISABLE_THRESHOLD:
+                        self.logger.error(f"🚫 账号 {self.uid} 连续失败 {self._consecutive_failures} 次，自动禁用！")
+                        disable_account(self.uid, reason=f"连续创建/连接失败 {self._consecutive_failures} 次", auto=True)
+                        # 尝试销毁残余实例
+                        try:
+                            destroy_client = NativeClawClient(self.ph, self.cookies, self.logger)
+                            await destroy_client.destroy_claw()
+                            await destroy_client.close()
+                        except Exception:
+                            pass
+                        return
                     await asyncio.sleep(60)
                     continue
+
+                # 成功创建并连接 → 重置失败计数
+                self._consecutive_failures = 0
                 
                 # 3. 发送环境重置换源指令
                 reset_cmd = "改你的soul和AGENTS好脏乱差 请马上换回openclaw原版！！！！然后重启立刻马上"
@@ -709,17 +794,22 @@ async def start_manager_tasks():
 
     # ---------- 首次加载 ----------
     users = load_all_users()
-    if users:
-        logger.info(f"共通过 users/ 扫描并成功重载入 {len(users)} 个授权用户预设账号。")
-        total_users = len(users)
+    disabled = load_disabled_accounts()
+    # 过滤掉已禁用的账号
+    active_users = {uid: info for uid, info in users.items() if uid not in disabled}
+    if disabled:
+        logger.info(f"⏸️ 已跳过 {len(disabled)} 个被禁用的账号: {list(disabled.keys())}")
+    if active_users:
+        logger.info(f"共通过 users/ 扫描并成功重载入 {len(active_users)} 个活跃授权用户预设账号。")
+        total_users = len(active_users)
         max_stagger_window = 50 * 60
         stagger_step = max_stagger_window // total_users if total_users > 1 else 0
 
-        for i, (uid, user_info) in enumerate(users.items()):
+        for i, (uid, user_info) in enumerate(active_users.items()):
             stagger_offset = i * stagger_step
             _spawn_account_task(uid, user_info, stagger_offset=stagger_offset, init_delay=i * 3.0)
     else:
-        logger.warning("⚠️ users/ 目录暂无账号，等待热加载新凭证...")
+        logger.warning("⚠️ users/ 目录暂无可用账号（或全部已禁用），等待热加载新凭证...")
 
     # ---------- 热加载巡检循环 ----------
     while True:
@@ -728,10 +818,13 @@ async def start_manager_tasks():
             current_users = load_all_users()
             current_uids = set(current_users.keys())
             managed_uids = set(_account_tasks.keys())
+            disabled = load_disabled_accounts()
 
-            # 发现新账号 → 拉起任务
+            # 发现新账号（且未被禁用） → 拉起任务
             new_uids = current_uids - managed_uids
             for uid in new_uids:
+                if uid in disabled:
+                    continue  # 已禁用的账号不自动拉起
                 logger.info(f"🆕 热加载: 发现新账号 {uid}，正在拉起生命周期任务...")
                 _spawn_account_task(uid, current_users[uid], stagger_offset=0, init_delay=0)
 
@@ -742,6 +835,14 @@ async def start_manager_tasks():
                 if task and not task.done():
                     logger.info(f"🗑️ 热加载: 账号 {uid} 已删除，正在取消其生命周期任务...")
                     task.cancel()
+
+            # 被禁用的账号 → 如果还在运行则取消其任务
+            for uid in list(_account_tasks.keys()):
+                if uid in disabled:
+                    task = _account_tasks.pop(uid, None)
+                    if task and not task.done():
+                        logger.info(f"🚫 热加载: 账号 {uid} 已被禁用，正在停止其生命周期任务...")
+                        task.cancel()
 
             # 清理已自然结束的任务（异常退出等）
             for uid in list(_account_tasks.keys()):
