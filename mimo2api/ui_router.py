@@ -104,7 +104,8 @@ async def fetch_user_status(data: dict) -> dict:
         "User-Agent": "Mozilla/5.0"
     }
     try:
-        async with httpx.AsyncClient(proxy=os.getenv("MIMO_PROXY_URL", "").strip() or None, timeout=5) as c:
+        from .manager import _get_proxy_url
+        async with httpx.AsyncClient(proxy=_get_proxy_url(), timeout=5) as c:
             r = await c.get(url, cookies=cookies, headers=headers, timeout=5)
             if r.status_code == 401:
                 return {**data, "claw_status": "EXPIRED(401)", "remain_sec": 0}
@@ -180,6 +181,7 @@ async def api_users_add(request: Request):
 async def api_users_recreate(uid: str):
     """手动触发单个账号的销毁 + 创建流程"""
     from urllib.parse import quote
+    from .manager import _get_proxy_url
 
     target_file = os.path.join(USERS_DIR, f"user_{uid}.json")
     if not os.path.exists(target_file):
@@ -207,7 +209,7 @@ async def api_users_recreate(uid: str):
     }
     base = "https://aistudio.xiaomimimo.com"
 
-    async with httpx.AsyncClient(proxy=os.getenv("MIMO_PROXY_URL", "").strip() or None) as client:
+    async with httpx.AsyncClient(proxy=_get_proxy_url()) as client:
         # 0. 签署用户协议（首次创建必须，后续调也无副作用）
         try:
             agree_url = f"{base}/open-apis/agreement/user/mimo-claw?xiaomichatbot_ph={quote(ph)}"
@@ -266,3 +268,55 @@ async def api_users_delete(uid: str):
         os.remove(target_file)
         return JSONResponse({"status": "ok"})
     return JSONResponse({"detail": "User not found"}, status_code=404)
+
+
+# ----------------- 代理配置 API -----------------
+
+PROXY_CONFIG_FILE = os.path.join(ROOT_DIR, "proxy_config.json")
+
+
+@router.get("/api/proxy")
+async def api_get_proxy():
+    """读取当前代理配置"""
+    proxy_url = ""
+    source = "none"
+    if os.path.exists(PROXY_CONFIG_FILE):
+        try:
+            with open(PROXY_CONFIG_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                proxy_url = data.get("proxy_url", "").strip()
+                if proxy_url:
+                    source = "webui"
+        except Exception:
+            pass
+    if not proxy_url:
+        proxy_url = os.getenv("MIMO_PROXY_URL", "").strip()
+        if proxy_url:
+            source = "env"
+    return JSONResponse({"proxy_url": proxy_url, "source": source})
+
+
+@router.put("/api/proxy")
+async def api_set_proxy(request: Request):
+    """设置代理（写入 proxy_config.json，立即热生效）"""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"detail": "请求体不是合法 JSON"}, status_code=400)
+
+    proxy_url = str(body.get("proxy_url", "")).strip()
+    if proxy_url and not any(proxy_url.startswith(p) for p in ("http://", "https://", "socks5://", "socks4://")):
+        return JSONResponse({"detail": "代理格式不正确，需以 http:// / https:// / socks5:// 开头"}, status_code=400)
+
+    with open(PROXY_CONFIG_FILE, "w", encoding="utf-8") as f:
+        json.dump({"proxy_url": proxy_url}, f, ensure_ascii=False, indent=2)
+
+    return JSONResponse({"status": "ok", "proxy_url": proxy_url, "message": "代理已保存，即时生效"})
+
+
+@router.delete("/api/proxy")
+async def api_delete_proxy():
+    """清除代理配置（删除 proxy_config.json，回退到环境变量或直连）"""
+    if os.path.exists(PROXY_CONFIG_FILE):
+        os.remove(PROXY_CONFIG_FILE)
+    return JSONResponse({"status": "ok", "message": "代理已清除，将回退到环境变量或直连"})
