@@ -1,13 +1,19 @@
 import os
 import json
 import re
+import secrets
 import time
 import asyncio
 import httpx
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from .auth import (
+    AI_AUTH_ENV,
+    AI_KEYS_CONFIG_FILE,
+    _load_extra_ai_keys,
+    _save_extra_ai_keys,
     create_webui_session_token,
+    get_all_ai_api_keys,
     get_webui_cookie_name,
     get_webui_session_ttl,
     get_webui_username,
@@ -465,3 +471,122 @@ async def api_test_xiequ():
             status_code=502,
         )
     return JSONResponse({"status": "ok", "proxy": proxy, "message": f"成功提取一条短效代理: {proxy}"})
+
+
+
+# ----------------- AI API Key 管理（多 Key + WebUI 热加载） -----------------
+
+
+def _mask_api_key(raw_key: str) -> str:
+    """把 Key 显示为 `sk-abcd...wxyz` 样式，避免在 WebUI 中明文回显。"""
+    if not raw_key:
+        return ""
+    if len(raw_key) <= 10:
+        return raw_key[:2] + "***"
+    return f"{raw_key[:6]}...{raw_key[-4:]}"
+
+
+@router.get("/api/keys")
+async def api_keys_list():
+    """列出当前所有 AI API Key（环境变量 + WebUI 文件）。返回都是脱敏 preview。"""
+    items: list[dict] = []
+
+    env_key = os.getenv(AI_AUTH_ENV, "").strip()
+    if env_key:
+        items.append({
+            "id": "env",
+            "name": f"环境变量 ({AI_AUTH_ENV})",
+            "masked": _mask_api_key(env_key),
+            "source": "env",
+            "deletable": False,
+            "created_at": None,
+        })
+
+    for k in _load_extra_ai_keys():
+        items.append({
+            "id": k.get("id"),
+            "name": k.get("name") or "",
+            "masked": _mask_api_key(k.get("key") or ""),
+            "source": "file",
+            "deletable": True,
+            "created_at": k.get("created_at") or None,
+        })
+
+    return JSONResponse({
+        "ai_auth_enabled": bool(items),
+        "env_key_set": bool(env_key),
+        "keys": items,
+        "config_file": AI_KEYS_CONFIG_FILE,
+    })
+
+
+@router.post("/api/keys")
+async def api_keys_add(request: Request):
+    """添加一条新的 AI API Key。
+
+    请求体（均可选）：
+      - ``name``: 备注名
+      - ``key``:  自定义 Key，留空则服务器随机生成 ``sk-<token_urlsafe(32)>``
+
+    响应中会一次性返回完整 ``key`` 明文，前端需让用户立即复制保存——
+    后续所有列表 API 只会返回脱敏 preview。
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    name = str((body or {}).get("name") or "").strip()
+    explicit_key = str((body or {}).get("key") or "").strip()
+
+    if explicit_key:
+        if len(explicit_key) < 8:
+            return JSONResponse({"detail": "自定义 Key 至少需要 8 个字符"}, status_code=400)
+        if any(ch.isspace() for ch in explicit_key):
+            return JSONResponse({"detail": "Key 不能包含空白字符"}, status_code=400)
+        new_key = explicit_key
+    else:
+        new_key = "sk-" + secrets.token_urlsafe(32)
+
+    # 防止与已有 Key（环境变量 / 文件）重复
+    if new_key in get_all_ai_api_keys():
+        return JSONResponse({"detail": "该 Key 已存在"}, status_code=400)
+
+    keys = _load_extra_ai_keys()
+    new_id = "k_" + secrets.token_hex(8)
+    item = {
+        "id": new_id,
+        "key": new_key,
+        "name": name or f"key-{new_id[2:8]}",
+        "created_at": int(time.time()),
+    }
+    keys.append(item)
+    _save_extra_ai_keys(keys)
+
+    return JSONResponse({
+        "status": "ok",
+        "id": new_id,
+        "key": new_key,            # 仅本次返回明文，后续只能拿到 masked
+        "name": item["name"],
+        "masked": _mask_api_key(new_key),
+        "created_at": item["created_at"],
+        "message": "API Key 已添加，立即生效",
+    })
+
+
+@router.delete("/api/keys/{key_id}")
+async def api_keys_delete(key_id: str):
+    """删除一条 WebUI 添加的 Key（环境变量 Key 不允许从 WebUI 删除）。"""
+    if not key_id or key_id == "env":
+        return JSONResponse(
+            {"detail": "环境变量配置的 Key 不能在 WebUI 删除，请修改 .env 后重启"},
+            status_code=400,
+        )
+
+    keys = _load_extra_ai_keys()
+    new_keys = [k for k in keys if k.get("id") != key_id]
+    if len(new_keys) == len(keys):
+        return JSONResponse({"detail": "Key 不存在"}, status_code=404)
+
+    _save_extra_ai_keys(new_keys)
+    return JSONResponse({"status": "ok", "message": "API Key 已删除，立即生效"})
