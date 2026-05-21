@@ -2,12 +2,15 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import os
 import secrets
 import time
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
+
+logger = logging.getLogger(__name__)
 
 AI_AUTH_ENV = "MIMO_RELAY_OPENAI_KEY"
 WEBUI_USERNAME_ENV = "MIMO_WEBUI_USERNAME"
@@ -17,13 +20,74 @@ WEBUI_SESSION_TTL_ENV = "MIMO_WEBUI_SESSION_TTL_SECONDS"
 WEBUI_COOKIE_NAME_ENV = "MIMO_WEBUI_COOKIE_NAME"
 WEBUI_COOKIE_SECURE_ENV = "MIMO_WEBUI_COOKIE_SECURE"
 
+# 工作目录根（与 manager.py / ui_router.py 中 ROOT_DIR 一致）：mimi3/
+_ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+AI_KEYS_CONFIG_FILE = os.path.join(_ROOT_DIR, "api_keys.json")
+
 
 def _read_env(name: str, default: str = "") -> str:
     return os.getenv(name, default).strip()
 
 
+# ----------------- 多 Key 持久化（WebUI 热加载） -----------------
+
+def _load_extra_ai_keys() -> list[dict]:
+    """从 api_keys.json 读取通过 WebUI 添加的所有 Key。
+
+    文件格式：``{"keys": [{"id": "k_xxx", "key": "sk-...", "name": "...", "created_at": 169...}, ...]}``
+    每次调用都会重新读盘，从而实现 WebUI 添加/删除后立即热生效（无需重启）。
+    """
+    if not os.path.exists(AI_KEYS_CONFIG_FILE):
+        return []
+    try:
+        with open(AI_KEYS_CONFIG_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f) or {}
+    except Exception as exc:
+        logger.warning(f"读取 api_keys.json 失败，将忽略文件中的 Key：{exc!r}")
+        return []
+
+    raw_keys = data.get("keys") or []
+    out: list[dict] = []
+    for item in raw_keys:
+        if not isinstance(item, dict):
+            continue
+        key_value = (item.get("key") or "").strip()
+        if not key_value:
+            continue
+        out.append({
+            "id": str(item.get("id") or ""),
+            "key": key_value,
+            "name": str(item.get("name") or ""),
+            "created_at": int(item.get("created_at") or 0),
+        })
+    return out
+
+
+def _save_extra_ai_keys(keys: list[dict]) -> None:
+    """覆盖写入 api_keys.json。"""
+    payload = {"keys": keys}
+    tmp_path = AI_KEYS_CONFIG_FILE + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+    os.replace(tmp_path, AI_KEYS_CONFIG_FILE)
+
+
+def get_all_ai_api_keys() -> list[str]:
+    """返回当前所有有效的 AI API Key（环境变量 + WebUI 文件，按顺序去重）。"""
+    out: list[str] = []
+    env_key = _read_env(AI_AUTH_ENV)
+    if env_key:
+        out.append(env_key)
+    for item in _load_extra_ai_keys():
+        v = item["key"]
+        if v and v not in out:
+            out.append(v)
+    return out
+
+
 def is_ai_auth_enabled() -> bool:
-    return bool(_read_env(AI_AUTH_ENV))
+    """只要有任意一条 Key（环境变量或 WebUI 文件）就视为开启鉴权。"""
+    return bool(get_all_ai_api_keys())
 
 
 def is_web_auth_enabled() -> bool:
@@ -31,6 +95,7 @@ def is_web_auth_enabled() -> bool:
 
 
 def get_ai_api_key() -> str:
+    """返回环境变量配置的主 Key（保留给 _get_webui_secret 等老调用做后备签名密钥用）。"""
     return _read_env(AI_AUTH_ENV)
 
 
@@ -81,12 +146,18 @@ def extract_ai_api_key(request: Request) -> str | None:
 
 
 def verify_ai_api_key(candidate: str | None) -> bool:
-    expected = get_ai_api_key()
-    if not expected:
+    expected_keys = get_all_ai_api_keys()
+    if not expected_keys:
+        # 未配置任何 Key → 不开启鉴权，全部放行
         return True
     if not candidate:
         return False
-    return secrets.compare_digest(candidate, expected)
+    # 与所有候选 Key 做常量时间比较；不提前 break，尽量减少 timing 信号
+    valid = False
+    for key in expected_keys:
+        if secrets.compare_digest(candidate, key):
+            valid = True
+    return valid
 
 
 def require_ai_request(request: Request) -> JSONResponse | None:

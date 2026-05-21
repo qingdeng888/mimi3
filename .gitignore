@@ -17,6 +17,7 @@ users/*.json
 proxy_config.json
 xiequ_config.json
 disabled_accounts.json
+api_keys.json
 
 # 抓包归档可能含 Cookie/Token，默认不纳入版本库
 archive/http_captures/

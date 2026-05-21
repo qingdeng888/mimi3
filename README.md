@@ -134,7 +134,7 @@ python main.py
 | `SERVER_HOST` | 否 | `0.0.0.0` | 网关绑定地址。 |
 | `SERVER_PORT` | 否 | `23655` | 网关绑定端口。 |
 | `WS_TUNNEL_URL` | **是** | `ws://{HOST}:{PORT}/ws` | Claw 节点反向连接的 WebSocket 地址。**必须是 Claw 容器能访问到的公网/穿透地址**，例如 `ws://your-domain.com:23655/ws` 或 `wss://your-domain.com/ws`。端口可自由自定义，详见 [端口与 WS_TUNNEL_URL 自定义](#端口与-ws_tunnel_url-自定义)。 |
-| `MIMO_RELAY_OPENAI_KEY` | 否 | 空 | 客户端调用 `/v1/*`、`/anthropic/v1/*` 时携带的 Bearer Key。**留空 = 不鉴权**。 |
+| `MIMO_RELAY_OPENAI_KEY` | 否 | 空 | 客户端调用 `/v1/*`、`/anthropic/v1/*` 时携带的 Bearer Key。**留空 = 不鉴权**。支持多 Key：除该环境变量外，可在 WebUI「AI API Key 管理」面板动态添加 / 删除（持久化到 `api_keys.json`，**任一匹配即放行，无需重启**）。|
 | `MIMO_WEBUI_USERNAME` | 否 | `admin` | WebUI 登录用户名。 |
 | `MIMO_WEBUI_PASSWORD` | 否 | 空 | WebUI 登录密码。**留空 = 不启用 WebUI 登录**。 |
 | `MIMO_WEBUI_SECRET` | 否 | 自动 | WebUI Session Cookie 签名密钥；缺省时使用密码兜底，建议显式设置一个长随机串。 |
