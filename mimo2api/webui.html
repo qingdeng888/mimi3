@@ -395,6 +395,36 @@
             </div>
         </div>
 
+        <!-- 内网通信节点连接详情卡片 -->
+        <div class="glass-card">
+            <div class="flex-between">
+                <h2 style="margin: 0; font-size: 18px;">内网通信节点连接详情（/ws）</h2>
+                <button class="btn btn-outline" onclick="fetchClients()" style="font-size:12px; padding:6px 12px;">刷新</button>
+            </div>
+            <div style="font-size:12px; color:var(--text-muted); margin-top:8px;">
+                列出当前所有保持长连接到 <code>/ws</code> 的内网桥接节点。可对单个节点执行
+                <strong>主动断开</strong>。被断开后，对应 Claw 容器内的 bridge 进程通常会在数秒内自动重连
+                （若启用了 <code>MIMO_WS_BRIDGE_TOKEN</code>，重连仍受密钥校验保护）。
+            </div>
+            <div class="table-wrapper" style="margin-top:14px;">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>#</th>
+                            <th>节点地址</th>
+                            <th>在线时长</th>
+                            <th>状态</th>
+                            <th style="text-align:right;">处理中请求</th>
+                            <th>操作</th>
+                        </tr>
+                    </thead>
+                    <tbody id="clientsBody">
+                        <tr><td colspan="6" class="empty-state">加载中...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
         <!-- 代理配置卡片 -->
         <div class="glass-card">
             <div class="flex-between">
@@ -611,11 +641,12 @@
             if (statusInterval) {
                 clearInterval(statusInterval);
             }
-            // 每 3s 刷新节点状态；每 ~15s 顺带刷新一次 Key 用量
+            // 每 3s 刷新节点状态 + 节点连接详情；每 ~15s 顺带刷新一次 Key 用量
             let tick = 0;
             statusInterval = setInterval(() => {
                 if (webAuthReady || !webAuthEnabled) {
                     fetchStatus();
+                    fetchClients();
                     tick = (tick + 1) % 5;
                     if (tick === 0) fetchKeys();
                 }
@@ -1101,8 +1132,67 @@
             }
         }
 
+        // ---------------- 内网通信节点连接详情 ----------------
+        function formatDuration(sec) {
+            sec = Number(sec) || 0;
+            if (sec < 60) return sec + ' 秒';
+            if (sec < 3600) return Math.floor(sec / 60) + ' 分 ' + (sec % 60) + ' 秒';
+            const h = Math.floor(sec / 3600);
+            const m = Math.floor((sec % 3600) / 60);
+            return h + ' 时 ' + m + ' 分';
+        }
+
+        async function fetchClients() {
+            try {
+                const res = await apiFetch('/api/clients');
+                const data = await res.json();
+                const tbody = document.getElementById('clientsBody');
+                if (!data.clients || data.clients.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="6" class="empty-state">当前没有任何内网节点保持连接</td></tr>';
+                    return;
+                }
+                tbody.innerHTML = data.clients.map(c => {
+                    const statusBadge = c.in_cooldown
+                        ? `<span class="badge warn" style="font-size:11px;" title="冷却剩余 ${c.cooldown_remaining_seconds} 秒">冷却中 (${c.cooldown_remaining_seconds}s)</span>`
+                        : '<span class="badge" style="font-size:11px; background:rgba(16,185,129,0.15); color:#047857; border-color:rgba(16,185,129,0.3);">在线</span>';
+                    const currentMark = c.current
+                        ? '<span class="badge" style="font-size:10px; margin-left:6px; background:rgba(79,70,229,0.15); border-color:rgba(79,70,229,0.3);" title="下一个 round-robin 命中节点">本轮命中</span>'
+                        : '';
+                    const pendingColor = c.pending_requests > 0 ? 'color:var(--primary);font-weight:600;' : 'color:var(--text-muted);';
+                    return `<tr>
+                        <td style="color:var(--text-muted); font-variant-numeric:tabular-nums;">${c.index + 1}</td>
+                        <td><code style="font-family:monospace; font-size:13px;">${escapeHtml(c.address)}</code>${currentMark}</td>
+                        <td style="font-size:13px;">${formatDuration(c.duration_seconds)}</td>
+                        <td>${statusBadge}</td>
+                        <td style="text-align:right; ${pendingColor} font-variant-numeric:tabular-nums;">${c.pending_requests}</td>
+                        <td>
+                            <button class="btn btn-danger" style="font-size:12px; padding:6px 12px;" onclick="disconnectClient('${escapeHtml(c.id)}', '${escapeHtml(c.address)}')">断开</button>
+                        </td>
+                    </tr>`;
+                }).join('');
+            } catch (e) {
+                if (e.message !== 'UNAUTHORIZED') console.error('加载节点连接详情失败', e);
+            }
+        }
+
+        async function disconnectClient(id, address) {
+            if (!confirm(`确定要主动断开节点 ${address} 的 WebSocket 连接吗？\n\n断开后该节点上正在处理中的请求会被标记为失败，但其 Claw 容器内的 bridge 通常会在数秒内自动重连。\n如启用了 MIMO_WS_BRIDGE_TOKEN，重连仍受密钥校验保护。`)) return;
+            try {
+                const res = await apiFetch('/api/clients/' + encodeURIComponent(id) + '/disconnect', {method: 'POST'});
+                const data = await res.json();
+                if (res.ok) {
+                    showToast(data.message || '已断开');
+                    setTimeout(() => { fetchClients(); fetchStatus(); }, 800);
+                } else {
+                    showToast(data.detail || '断开失败', 'error');
+                }
+            } catch (e) {
+                if (e.message !== 'UNAUTHORIZED') showToast('断开请求异常', 'error');
+            }
+        }
+
         async function initializeDashboard() {
-            await Promise.all([fetchStatus(), fetchUsers(), fetchProxy(), fetchXiequ(), fetchKeys()]);
+            await Promise.all([fetchStatus(), fetchClients(), fetchUsers(), fetchProxy(), fetchXiequ(), fetchKeys()]);
             startStatusPolling();
         }
 

@@ -17,6 +17,8 @@ class GatewayState:
         self.current_client_index: int = 0
         self.rebuild_event: asyncio.Event = asyncio.Event()
         self.client_cooldowns: Dict[int, float] = {}
+        # 节点接入时间戳：id(ws) -> 接入 Unix 时间戳，用于 WebUI 展示在线时长
+        self.client_connected_at: Dict[int, float] = {}
         self.metrics_started_at: float = time.time()
         self.metrics_history_last_snapshot: Dict[str, Any] | None = None
         self.metrics: Dict[str, Any] = self._default_metrics()

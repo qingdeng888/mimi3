@@ -395,6 +395,7 @@ async def ws_tunnel(ws: WebSocket):
     await ws.accept()
     state.active_clients.append(ws)
     state.client_cooldowns.pop(id(ws), None)
+    state.client_connected_at[id(ws)] = time.time()
     logger.info(f"✅ 内网节点已接入: {client_addr}。当前在线节点数: {len(state.active_clients)}")
     
     try:
@@ -413,6 +414,7 @@ async def ws_tunnel(ws: WebSocket):
         if ws in state.active_clients:
             state.active_clients.remove(ws)
         state.client_cooldowns.pop(id(ws), None)
+        state.client_connected_at.pop(id(ws), None)
         
         # 清理该节点的所有孤儿队列
         orphan_ids = state.ws_to_req_ids.pop(id(ws), set())
