@@ -4,15 +4,20 @@ KEY = os.getenv("MIMO_API_KEY")
 URL = os.getenv("MIMO_API_ENDPOINT")
 BASE = URL.split("/v1/")[0] if "/v1/" in URL else URL
 WS_URL = "__WS_URL__"
-# 桥接共享密钥占位符；manager.py 会用 json.dumps(token) 整体替换右侧字符串字面量，
-# 这样即便 token 含双引号 / 反斜杠等特殊字符也能正确转义为合法 Python 字面量。
-# 留空（"" 或字面占位符）则按未鉴权直连原 WS_URL。
+# 桥接共享密钥占位符；manager.py 会用 json.dumps(token) 整体替换 ``"__BRIDGE_TOKEN__"`` 字面量。
+# - 网关未配置 MIMO_WS_BRIDGE_TOKEN → 替换为空串 ""，下面 `if not BRIDGE_TOKEN` 为真 → 按未鉴权直连。
+# - 网关配置了 MIMO_WS_BRIDGE_TOKEN  → 替换为 "<token>"，自动以 ?token=... 形式拼接到 WS_URL。
+#
+# ⚠️ 这里只能出现这一处 ``"__BRIDGE_TOKEN__"`` 字面量，不要在其他地方再写一次！
+#    因为 manager.py 用的是全局 str.replace，多处出现会被同时替换，从而破坏控制流
+#    （历史上「BRIDGE_TOKEN == "__BRIDGE_TOKEN__"」的兜底分支就是因此自我矛盾，
+#     导致下发的 bridge 永远不带 token、被服务端 1008 直接拒绝、节点上不了线）。
 BRIDGE_TOKEN = "__BRIDGE_TOKEN__"
 
 
 def _build_ws_url() -> str:
     """把 token 以 query 参数的形式拼到 WS_URL 上；token 为空时原样返回。"""
-    if not BRIDGE_TOKEN or BRIDGE_TOKEN == "__BRIDGE_TOKEN__":
+    if not BRIDGE_TOKEN:
         return WS_URL
     sep = "&" if "?" in WS_URL else "?"
     return f"{WS_URL}{sep}token={urllib.parse.quote(BRIDGE_TOKEN, safe='')}"
