@@ -643,6 +643,28 @@ async def api_keys_add(request: Request):
     })
 
 
+@router.post("/api/keys/{key_id}/reset-usage")
+async def api_keys_reset_usage(key_id: str):
+    """重置某条 Key 的用量统计（归零请求数 / Token 数 / 最近使用时间）。
+
+    适用于所有来源的 Key（环境变量 / WebUI 文件 / anonymous），不影响 Key 本身是否有效。
+    """
+    keys_bucket = state.metrics.get("keys")
+    if not keys_bucket or key_id not in keys_bucket:
+        return JSONResponse({"detail": "该 Key 尚无任何用量记录"}, status_code=404)
+
+    keys_bucket[key_id] = {
+        "requests_total": 0,
+        "requests_succeeded": 0,
+        "requests_failed": 0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+        "last_used_at": 0,
+    }
+    return JSONResponse({"status": "ok", "message": f"Key {key_id} 的用量统计已重置为零"})
+
+
 @router.delete("/api/keys/{key_id}")
 async def api_keys_delete(key_id: str):
     """删除一条 WebUI 添加的 Key（环境变量 Key 不允许从 WebUI 删除）。"""

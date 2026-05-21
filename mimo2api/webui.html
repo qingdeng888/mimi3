@@ -1105,6 +1105,9 @@
                         const delBtn = k.deletable
                             ? `<button class="btn btn-danger" style="font-size:12px; padding:6px 12px;" onclick="deleteKey('${escapeHtml(k.id)}')">删除</button>`
                             : '<span style="color:var(--text-muted); font-size:12px;">—</span>';
+                        const resetBtn = (u.requests_total > 0)
+                            ? `<button class="btn btn-outline" style="font-size:12px; padding:6px 10px; margin-right:6px;" onclick="resetKeyUsage('${escapeHtml(k.id)}')">重置</button>`
+                            : '';
                         return `<tr>
                             <td>${escapeHtml(k.name) || '<span style="color:var(--text-muted)">(未命名)</span>'}</td>
                             <td><code style="font-family:monospace; font-size:13px; color:#1e1b4b;">${escapeHtml(k.masked)}</code></td>
@@ -1115,7 +1118,7 @@
                             <td style="text-align:right; font-variant-numeric:tabular-nums;">${formatNum(u.prompt_tokens)}</td>
                             <td style="text-align:right; font-variant-numeric:tabular-nums;">${formatNum(u.completion_tokens)}</td>
                             <td style="font-size:12px;">${formatLastUsed(u.last_used_at)}</td>
-                            <td>${delBtn}</td>
+                            <td>${resetBtn}${delBtn}</td>
                         </tr>`;
                     }).join('');
                 } else {
@@ -1190,6 +1193,22 @@
                 }
             } catch (e) {
                 if (e.message !== 'UNAUTHORIZED') showToast('删除请求异常', 'error');
+            }
+        }
+
+        async function resetKeyUsage(id) {
+            if (!confirm('确定要重置这条 Key 的用量统计吗？\n重置后请求数、Token 数、最近使用时间都将归零。Key 本身不受影响。')) return;
+            try {
+                const res = await apiFetch('/api/keys/' + encodeURIComponent(id) + '/reset-usage', {method: 'POST'});
+                const data = await res.json();
+                if (res.ok) {
+                    showToast(data.message || '已重置');
+                    fetchKeys();
+                } else {
+                    showToast(data.detail || '重置失败', 'error');
+                }
+            } catch (e) {
+                if (e.message !== 'UNAUTHORIZED') showToast('重置请求异常', 'error');
             }
         }
 
