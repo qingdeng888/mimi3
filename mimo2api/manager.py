@@ -348,6 +348,12 @@ async def get_bridge_code() -> str:
         raise ValueError("MIMO2API_WS_URL环境变量未配置")
     # 动态把桥接脚本里面原来写死的 WS_URL 给替换掉，并返回修改后的代码块。
     code = code.replace("__WS_URL__", ws_url)
+
+    # 同步把 /ws 桥接共享密钥（可选）模板进 bridge.py。留空则下发的 bridge 不带 token，
+    # 与服务端「未启用鉴权」语义对齐；服务端若已开启鉴权则会拒绝旧 bridge 重连，
+    # Manager 下一次重建周期会自然把携带 token 的新 bridge 注入进去。
+    bridge_token = os.environ.get("MIMO_WS_BRIDGE_TOKEN", "")
+    code = code.replace("__BRIDGE_TOKEN__", bridge_token)
     return code
 
 
