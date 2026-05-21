@@ -689,16 +689,30 @@ docker compose logs -f mimi3
 
 #### 持久化卷映射
 
-`docker-compose.yml` 已把以下目录/文件 bind 挂载到宿主机当前目录：
+`docker-compose.yml` 已把以下目录/文件 bind 挂载到宿主机当前目录，**容器删除/重建不会丢失任何配置或用量统计**：
 
 | 宿主机 | 容器内 | 用途 |
 | --- | --- | --- |
-| `./users` | `/app/users` | 账号池（每账号一个 JSON），删除容器不丢账号 |
+| `./users` | `/app/users` | 账号池（每账号一个 JSON） |
 | `./logs` | `/app/logs` | gateway.log 滚动日志 |
-| `./data` | `/app/data` | 指标 SQLite + 快照 + 进程锁 |
+| `./data` | `/app/data` | 全部运行时持久化文件，详见下表 |
 | `./model_mapping.json` | `/app/model_mapping.json` | 模型映射，可在 WebUI 实时编辑 |
 
+`./data/` 目录下的文件清单：
+
+| 文件 | 容器内默认路径 | 覆盖环境变量 | 用途 |
+| --- | --- | --- | --- |
+| `gateway_metrics.db` | `/app/data/gateway_metrics.db` | `MIMO_METRICS_DB_PATH` | SQLite 用量统计库（请求数 / Token / 成功率 / 历史曲线） |
+| `gateway_snapshot.json` | `/app/data/gateway_snapshot.json` | `MIMO_METRICS_SNAPSHOT_PATH` | 内存指标定时快照（重启前实时数据兜底） |
+| `mimo2api.lock` | `/app/data/mimo2api.lock` | `MIMO_PROCESS_LOCK_PATH` | 单进程锁 |
+| `proxy_config.json` | `/app/data/proxy_config.json` | `MIMO_PROXY_CONFIG_PATH` | WebUI 设置的代理（热加载） |
+| `xiequ_config.json` | `/app/data/xiequ_config.json` | `MIMO_XIEQU_CONFIG_PATH` | 携趣 IP 短效代理 API 配置（热加载） |
+| `api_keys.json` | `/app/data/api_keys.json` | `MIMO_AI_KEYS_PATH` | WebUI 添加的所有 AI API Key（热加载） |
+| `disabled_accounts.json` | `/app/data/disabled_accounts.json` | `MIMO_DISABLED_ACCOUNTS_PATH` | 账号禁用列表 |
+
 > ⚠️ `./model_mapping.json` 是单文件挂载，**首次启动前宿主机必须存在该文件**。直接克隆本仓库即可（仓库已自带）。如果你是干净环境，先 `cp env.example .env` 后还需 `touch model_mapping.json && echo '{}' > model_mapping.json`。
+>
+> 📌 **从老版本升级**：早期版本只把账号凭证（`./users`）持久化，代理 / 携趣 / api_keys / disabled_accounts 这些 JSON 还放在 `/app/` 根目录里，容器一重建就丢。新版本统一搬到 `/app/data/`。如果你之前在 WebUI 里配过这些设置，重新建容器前请先把 `proxy_config.json` / `xiequ_config.json` / `api_keys.json` / `disabled_accounts.json` 从旧容器拷出来放进宿主的 `./data/` 目录即可（`docker cp <容器名>:/app/proxy_config.json ./data/`），或者升级后在 WebUI 里重新填一次。
 
 #### 反向代理 / WSS 场景
 

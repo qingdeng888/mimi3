@@ -22,7 +22,27 @@ WEBUI_COOKIE_SECURE_ENV = "MIMO_WEBUI_COOKIE_SECURE"
 
 # 工作目录根（与 manager.py / ui_router.py 中 ROOT_DIR 一致）：mimi3/
 _ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-AI_KEYS_CONFIG_FILE = os.path.join(_ROOT_DIR, "api_keys.json")
+
+
+def _resolve_ai_keys_path() -> str:
+    """计算 api_keys.json 的实际持久化路径。
+
+    优先级：``MIMO_AI_KEYS_PATH`` 环境变量 > ``<repo>/api_keys.json``。Docker 部署一般会把
+    该变量指向 ``/app/data/api_keys.json``，让 WebUI 添加的 Key 也跟着 ``./data`` 卷一起持久化，
+    容器重建不丢失。父目录在缺失时自动创建。
+    """
+    raw = os.getenv("MIMO_AI_KEYS_PATH", "").strip()
+    path = raw if raw else os.path.join(_ROOT_DIR, "api_keys.json")
+    parent = os.path.dirname(os.path.abspath(path))
+    if parent:
+        try:
+            os.makedirs(parent, exist_ok=True)
+        except Exception:
+            pass
+    return path
+
+
+AI_KEYS_CONFIG_FILE = _resolve_ai_keys_path()
 
 
 def _read_env(name: str, default: str = "") -> str:

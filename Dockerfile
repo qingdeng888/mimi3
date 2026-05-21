@@ -9,7 +9,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     SERVER_PORT=23655 \
     MIMO_METRICS_DB_PATH=/app/data/gateway_metrics.db \
     MIMO_METRICS_SNAPSHOT_PATH=/app/data/gateway_snapshot.json \
-    MIMO_PROCESS_LOCK_PATH=/app/data/mimo2api.lock
+    MIMO_PROCESS_LOCK_PATH=/app/data/mimo2api.lock \
+    MIMO_PROXY_CONFIG_PATH=/app/data/proxy_config.json \
+    MIMO_XIEQU_CONFIG_PATH=/app/data/xiequ_config.json \
+    MIMO_AI_KEYS_PATH=/app/data/api_keys.json \
+    MIMO_DISABLED_ACCOUNTS_PATH=/app/data/disabled_accounts.json
 
 WORKDIR /app
 
