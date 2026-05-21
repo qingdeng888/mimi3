@@ -628,3 +628,89 @@ async def api_keys_delete(key_id: str):
 
     _save_extra_ai_keys(new_keys)
     return JSONResponse({"status": "ok", "message": "API Key 已删除，立即生效"})
+
+
+
+# ----------------- 内网通信节点连接管理 -----------------
+
+
+@router.get("/api/clients")
+async def api_clients_list():
+    """列出当前所有保持长连接的内网通信节点（active /ws 客户端）的实时状态。
+
+    每条返回：
+      - ``id``: 字符串形式的 ``id(ws)``，用于断开 API 定位 WS 对象。
+      - ``host`` / ``port``: 节点的源 IP 与端口
+      - ``connected_at``: Unix 时间戳；``duration_seconds`` 已运行秒数
+      - ``in_cooldown`` / ``cooldown_remaining_seconds``: 冷却状态（如 401 触发的临时跳过）
+      - ``pending_requests``: 当前正由该节点处理中的请求队列数
+      - ``current``: 是否是下一次 round-robin 命中的节点（仅作展示）
+    """
+    import time as _time
+
+    now = _time.time()
+    items: list[dict] = []
+    # 注意：state.active_clients 列表索引会随删除变化，不能依赖；用 id(ws) 当稳定 key
+    for index, ws in enumerate(state.active_clients):
+        ws_id = id(ws)
+        connected_at = state.client_connected_at.get(ws_id, 0)
+        cooldown_until = state.client_cooldowns.get(ws_id, 0)
+        in_cooldown = cooldown_until > now
+        host = ws.client.host if ws.client else "Unknown"
+        port = ws.client.port if ws.client else 0
+        items.append({
+            "id": str(ws_id),
+            "index": index,
+            "host": host,
+            "port": port,
+            "address": f"{host}:{port}",
+            "connected_at": int(connected_at) if connected_at else None,
+            "duration_seconds": int(now - connected_at) if connected_at else None,
+            "in_cooldown": in_cooldown,
+            "cooldown_until": int(cooldown_until) if in_cooldown else None,
+            "cooldown_remaining_seconds": max(0, int(cooldown_until - now)) if in_cooldown else 0,
+            "pending_requests": len(state.ws_to_req_ids.get(ws_id, set())),
+            "current": index == state.current_client_index,
+        })
+
+    return JSONResponse({
+        "total": len(items),
+        "available": sum(1 for x in items if not x["in_cooldown"]),
+        "clients": items,
+    })
+
+
+@router.post("/api/clients/{client_id}/disconnect")
+async def api_clients_disconnect(client_id: str):
+    """强制断开一个内网通信节点的 WebSocket 连接。
+
+    ``client_id`` 是 ``GET /api/clients`` 中返回的 ``id`` 字段（即 ``id(ws)`` 的字符串形式）。
+    断开后 ``ws_tunnel`` 的 finally 分支会自然回收 ``active_clients`` / 冷却状态 /
+    孤儿请求队列；该节点对应的 Claw 容器内 bridge.py 通常会在 3s 后自动重连
+    （若网关已启用 MIMO_WS_BRIDGE_TOKEN 鉴权，重连仍需带正确 token）。
+    """
+    try:
+        target_ws_id = int(client_id)
+    except (TypeError, ValueError):
+        return JSONResponse({"detail": "client_id 不是合法的整数"}, status_code=400)
+
+    target_ws = next((ws for ws in state.active_clients if id(ws) == target_ws_id), None)
+    if target_ws is None:
+        return JSONResponse({"detail": "该客户端不在当前在线列表中（可能刚刚断开）"}, status_code=404)
+
+    addr = f"{target_ws.client.host}:{target_ws.client.port}" if target_ws.client else "Unknown"
+    try:
+        # 1000 = Normal Closure；用 1001 (Going Away) 也可以，按 RFC 6455 都属于"主动关闭"
+        await target_ws.close(code=1000)
+    except Exception as e:
+        # 即便 close 抛异常，ws_tunnel 的 receive_text() 也很快会因 socket 关闭而抛错并进入 finally 清理；
+        # 这里不当致命错误处理。
+        return JSONResponse({
+            "status": "ok",
+            "message": f"已发送关闭帧（伴随异常: {e}），节点 {addr} 将在最迟数秒内被回收",
+        })
+
+    return JSONResponse({
+        "status": "ok",
+        "message": f"已主动断开节点 {addr}，连接将在数秒内从 active_clients 列表中移除",
+    })
