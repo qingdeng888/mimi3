@@ -4,7 +4,8 @@ KEY = os.getenv("MIMO_API_KEY")
 URL = os.getenv("MIMO_API_ENDPOINT")
 BASE = URL.split("/v1/")[0] if "/v1/" in URL else URL
 WS_URL = "__WS_URL__"
-# 桥接共享密钥占位符；manager.py 在下发前会替换成 MIMO_WS_BRIDGE_TOKEN 的值，
+# 桥接共享密钥占位符；manager.py 会用 json.dumps(token) 整体替换右侧字符串字面量，
+# 这样即便 token 含双引号 / 反斜杠等特殊字符也能正确转义为合法 Python 字面量。
 # 留空（"" 或字面占位符）则按未鉴权直连原 WS_URL。
 BRIDGE_TOKEN = "__BRIDGE_TOKEN__"
 
