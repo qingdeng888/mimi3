@@ -697,7 +697,9 @@
                         return `
                         <tr style="${rowOpacity}">
                             <td><strong style="color:var(--primary)">${u.userId}</strong>${disabledBadge}</td>
-                            <td>${u.name || '(未命名)'}</td>
+                            <td>
+                                <span class="editable-name" data-uid="${u.userId}" data-name="${(u.name || '').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;')}" title="点击编辑备注名" style="cursor:pointer; border-bottom:1px dashed var(--text-muted); padding-bottom:1px;" onclick="startEditName(this)">${u.name || '<em style=\"color:var(--text-muted)\">(点击编辑)</em>'}</span>
+                            </td>
                             <td>
                                 <div><strong style="color: ${statusColor}">${u.claw_status || '未知'}</strong></div>
                                 <div class="countdown-text" data-remain="${u.remain_sec}" style="font-size: 12px; color: var(--text-muted); margin-top: 4px;">
@@ -756,6 +758,65 @@
             } catch(e) {
                 if (e.message !== 'UNAUTHORIZED') showToast('请求异常', 'error');
             }
+        }
+
+        // ---------- 备注名编辑 ----------
+        function startEditName(spanEl) {
+            const uid = spanEl.dataset.uid;
+            const currentName = spanEl.dataset.name || '';
+            // 避免重复编辑（已存在 input 时不再触发）
+            if (spanEl.querySelector('input')) return;
+
+            const input = document.createElement('input');
+            input.type = 'text';
+            input.value = currentName;
+            input.className = 'text-input';
+            input.style.cssText = 'font-size:13px; padding:4px 8px; width:120px; margin:0;';
+            input.maxLength = 30;
+
+            spanEl.innerHTML = '';
+            spanEl.style.borderBottom = 'none';
+            spanEl.appendChild(input);
+            input.focus();
+            input.select();
+
+            const commit = async () => {
+                const newName = input.value.trim();
+                if (!newName || newName === currentName) {
+                    // 没改或清空 → 还原
+                    spanEl.innerHTML = currentName || '<em style="color:var(--text-muted)">(点击编辑)</em>';
+                    spanEl.style.borderBottom = '1px dashed var(--text-muted)';
+                    return;
+                }
+                try {
+                    const res = await apiFetch(`/api/users/rename/${uid}`, {
+                        method: 'PATCH',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({name: newName})
+                    });
+                    const data = await res.json();
+                    if (res.ok) {
+                        showToast(data.message || '备注名已更新');
+                        spanEl.dataset.name = newName;
+                        spanEl.innerHTML = escapeHtml(newName);
+                        spanEl.style.borderBottom = '1px dashed var(--text-muted)';
+                    } else {
+                        showToast(data.detail || '更新失败', 'error');
+                        spanEl.innerHTML = currentName || '<em style="color:var(--text-muted)">(点击编辑)</em>';
+                        spanEl.style.borderBottom = '1px dashed var(--text-muted)';
+                    }
+                } catch(e) {
+                    if (e.message !== 'UNAUTHORIZED') showToast('请求异常', 'error');
+                    spanEl.innerHTML = currentName || '<em style="color:var(--text-muted)">(点击编辑)</em>';
+                    spanEl.style.borderBottom = '1px dashed var(--text-muted)';
+                }
+            };
+
+            input.addEventListener('blur', commit);
+            input.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
+                if (e.key === 'Escape') { input.value = currentName; input.blur(); }
+            });
         }
 
         async function recreateUser(uid) {

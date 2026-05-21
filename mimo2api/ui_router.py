@@ -280,6 +280,34 @@ async def api_users_recreate(uid: str):
         return JSONResponse({"detail": f"创建超时，最后状态: {last_status}"}, status_code=504)
 
 
+@router.patch("/api/users/rename/{uid}")
+async def api_users_rename(uid: str, request: Request):
+    """修改账号备注名（仅更新 name 字段，不影响凭证与生命周期）"""
+    target_file = os.path.join(USERS_DIR, f"user_{uid}.json")
+    if not os.path.exists(target_file):
+        return JSONResponse({"detail": "User not found"}, status_code=404)
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"detail": "请求体不是合法 JSON"}, status_code=400)
+
+    new_name = str(body.get("name", "")).strip()
+    if not new_name:
+        return JSONResponse({"detail": "备注名不能为空"}, status_code=400)
+
+    try:
+        with open(target_file, "r", encoding="utf-8") as f:
+            user_data = json.load(f)
+        user_data["name"] = new_name
+        with open(target_file, "w", encoding="utf-8") as f:
+            json.dump(user_data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        return JSONResponse({"detail": f"保存失败: {e}"}, status_code=500)
+
+    return JSONResponse({"status": "ok", "name": new_name, "message": f"备注名已更新为「{new_name}」"})
+
+
 @router.delete("/api/users/delete/{uid}")
 async def api_users_delete(uid: str):
     target_file = os.path.join(USERS_DIR, f"user_{uid}.json")
