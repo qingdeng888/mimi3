@@ -25,12 +25,26 @@ services:
 
     # 这些值可在 .env 中覆盖；放在这里是给出"容器内默认路径"，
     # 与下方 volumes 挂载点保持一致。
+    #
+    # 所有运行时持久化文件都集中放在 /app/data 下，对应宿主机的 ./data 目录：
+    #   gateway_metrics.db          —— SQLite 用量指标库
+    #   gateway_snapshot.json       —— 内存指标定时快照
+    #   mimo2api.lock               —— 单进程锁
+    #   proxy_config.json           —— WebUI 设置的代理配置（热加载）
+    #   xiequ_config.json           —— 携趣 IP 短效代理 API 配置（热加载）
+    #   api_keys.json               —— WebUI 添加的 AI API Key（热加载）
+    #   disabled_accounts.json      —— 账号禁用列表
+    # 这样容器删除/重建后，所有设置和用量统计都不会丢失。
     environment:
       SERVER_HOST: 0.0.0.0
       SERVER_PORT: 23655
       MIMO_METRICS_DB_PATH: /app/data/gateway_metrics.db
       MIMO_METRICS_SNAPSHOT_PATH: /app/data/gateway_snapshot.json
       MIMO_PROCESS_LOCK_PATH: /app/data/mimo2api.lock
+      MIMO_PROXY_CONFIG_PATH: /app/data/proxy_config.json
+      MIMO_XIEQU_CONFIG_PATH: /app/data/xiequ_config.json
+      MIMO_AI_KEYS_PATH: /app/data/api_keys.json
+      MIMO_DISABLED_ACCOUNTS_PATH: /app/data/disabled_accounts.json
 
     ports:
       # 宿主机端口可通过 .env 中的 SERVER_PORT 覆盖（默认 23655）
@@ -41,7 +55,10 @@ services:
       - ./users:/app/users
       # 运行日志（gateway.log 滚动文件）
       - ./logs:/app/logs
-      # SQLite 指标库 + 快照 + 进程锁
+      # 全部运行时持久化文件统一在这里：
+      #   - SQLite 指标库 + 快照 + 进程锁
+      #   - 代理 / 携趣 / api_keys / disabled_accounts 等设置 JSON
+      # 容器重建只要保留 ./data，所有"账号凭证、设置、用量统计"就都不会丢
       - ./data:/app/data
       # 模型映射（可被 WebUI / API 在线编辑），单文件挂载需保证宿主上文件存在
       - ./model_mapping.json:/app/model_mapping.json

@@ -349,7 +349,9 @@ async def api_users_enable(uid: str):
 
 # ----------------- 代理配置 API -----------------
 
-PROXY_CONFIG_FILE = os.path.join(ROOT_DIR, "proxy_config.json")
+# 复用 manager.py 中的 PROXY_CONFIG_FILE，避免两侧路径解析逻辑出现分歧
+# （否则 WebUI 写到一处、_get_proxy_url 读到另一处，配置看似保存却不生效）
+from .manager import PROXY_CONFIG_FILE
 
 
 @router.get("/api/proxy")
@@ -401,7 +403,8 @@ async def api_delete_proxy():
 
 # ----------------- 携趣 IP 短效代理 API -----------------
 
-XIEQU_CONFIG_FILE = os.path.join(ROOT_DIR, "xiequ_config.json")
+# 同上，复用 manager.py 的 XIEQU_CONFIG_FILE，让两侧读写完全一致
+from .manager import XIEQU_CONFIG_FILE
 
 
 @router.get("/api/xiequ")

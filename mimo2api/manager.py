@@ -44,8 +44,34 @@ ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BASE_URL = "https://aistudio.xiaomimimo.com"
 WS_URL = "wss://aistudio.xiaomimimo.com/ws/proxy"
 
+
+def _persist_path(env_var: str, default_filename: str) -> str:
+    """统一解析"可被环境变量覆盖"的持久化文件路径。
+
+    设计目标：让 Docker 部署能把所有运行时配置/状态统一写到 /app/data 这种已挂载卷的目录，
+    而本机直跑（python main.py）时仍保持把文件落在仓库根目录的兼容行为。
+
+    解析顺序：
+      1. 若环境变量 ``env_var`` 已设置且非空 → 直接采用；
+      2. 否则 → 退化为 ``ROOT_DIR/<default_filename>``（与历史版本完全一致）。
+
+    同时在父目录不存在时自动 ``mkdir -p``，避免首次写入因目录缺失抛 FileNotFoundError。
+    """
+    raw = os.getenv(env_var, "").strip()
+    path = raw if raw else os.path.join(ROOT_DIR, default_filename)
+    parent = os.path.dirname(os.path.abspath(path))
+    if parent:
+        try:
+            os.makedirs(parent, exist_ok=True)
+        except Exception:
+            pass
+    return path
+
+
 # ----------------- 账号禁用状态管理 -----------------
-DISABLED_ACCOUNTS_FILE = os.path.join(ROOT_DIR, "disabled_accounts.json")
+DISABLED_ACCOUNTS_FILE = _persist_path("MIMO_DISABLED_ACCOUNTS_PATH", "disabled_accounts.json")
+# 代理配置文件（同时被 ui_router.py 复用，保证读写路径一致）
+PROXY_CONFIG_FILE = _persist_path("MIMO_PROXY_CONFIG_PATH", "proxy_config.json")
 # 自动禁用阈值：连续失败次数达到此值触发自动禁用
 AUTO_DISABLE_THRESHOLD = 5
 
@@ -109,11 +135,11 @@ def _get_proxy_url() -> str | None:
     """获取代理地址，仅用于 Claw 创建/销毁/状态查询请求。
     优先读取 proxy_config.json（WebUI 热配置），其次读环境变量 MIMO_PROXY_URL。
     """
-    # 1. 优先从文件读取（支持 WebUI 热加载）
-    proxy_file = os.path.join(ROOT_DIR, "proxy_config.json")
+    # 1. 优先从文件读取（支持 WebUI 热加载；路径来自 PROXY_CONFIG_FILE，
+    #    即 ROOT_DIR/proxy_config.json 或 MIMO_PROXY_CONFIG_PATH 指向的位置）
     try:
-        if os.path.exists(proxy_file):
-            with open(proxy_file, "r", encoding="utf-8") as f:
+        if os.path.exists(PROXY_CONFIG_FILE):
+            with open(PROXY_CONFIG_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 url = data.get("proxy_url", "").strip()
                 if url:
@@ -126,7 +152,7 @@ def _get_proxy_url() -> str | None:
 
 # ----------------- 携趣 IP 短效代理 -----------------
 
-XIEQU_CONFIG_FILE = os.path.join(ROOT_DIR, "xiequ_config.json")
+XIEQU_CONFIG_FILE = _persist_path("MIMO_XIEQU_CONFIG_PATH", "xiequ_config.json")
 
 
 def _get_xiequ_api_url() -> str | None:
