@@ -427,18 +427,22 @@
             </div>
         </div>
 
-        <!-- AI API Key 管理卡片（支持多 Key + 热加载） -->
+        <!-- AI API Key 管理卡片（支持多 Key + 热加载 + 用量统计） -->
         <div class="glass-card">
             <div class="flex-between">
-                <h2 style="margin: 0; font-size: 18px;">AI API Key 管理（MIMO_RELAY_OPENAI_KEY，多 Key）</h2>
-                <button class="btn" onclick="openKeyModal()">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
-                    添加 Key
-                </button>
+                <h2 style="margin: 0; font-size: 18px;">AI API Key 管理 & 用量统计（MIMO_RELAY_OPENAI_KEY）</h2>
+                <div style="display:flex; gap:8px; align-items:center;">
+                    <button class="btn btn-outline" onclick="fetchKeys()" style="font-size:12px; padding:6px 12px;">刷新用量</button>
+                    <button class="btn" onclick="openKeyModal()">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+                        添加 Key
+                    </button>
+                </div>
             </div>
             <div style="font-size:12px; color:var(--text-muted); margin-top:8px;">
                 控制客户端调用 <code>/v1/*</code> 与 <code>/anthropic/v1/*</code> 时携带的 Bearer Key。
                 支持配置多条 Key（任一匹配即放行），WebUI 添加 / 删除 <strong>立即热生效</strong>，无需重启。
+                每条 Key 实时统计：<strong>总请求 / 成功 / 失败 / 输入 Token / 输出 Token</strong>，进程持久化（重启不丢累计）。
                 环境变量 <code>MIMO_RELAY_OPENAI_KEY</code> 配置的 Key 会显示在列表中，但只能在容器/进程层修改。
             </div>
             <div class="table-wrapper" style="margin-top:14px;">
@@ -448,12 +452,17 @@
                             <th>名称</th>
                             <th>Key 预览</th>
                             <th>来源</th>
-                            <th>创建时间</th>
+                            <th style="text-align:right;">总请求</th>
+                            <th style="text-align:right;">成功</th>
+                            <th style="text-align:right;">失败</th>
+                            <th style="text-align:right;">输入 Tokens</th>
+                            <th style="text-align:right;">输出 Tokens</th>
+                            <th>最近使用</th>
                             <th>操作</th>
                         </tr>
                     </thead>
                     <tbody id="keysBody">
-                        <tr><td colspan="5" class="empty-state">加载中...</td></tr>
+                        <tr><td colspan="10" class="empty-state">加载中...</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -602,9 +611,13 @@
             if (statusInterval) {
                 clearInterval(statusInterval);
             }
+            // 每 3s 刷新节点状态；每 ~15s 顺带刷新一次 Key 用量
+            let tick = 0;
             statusInterval = setInterval(() => {
                 if (webAuthReady || !webAuthEnabled) {
                     fetchStatus();
+                    tick = (tick + 1) % 5;
+                    if (tick === 0) fetchKeys();
                 }
             }, 3000);
         }
@@ -952,11 +965,29 @@
             }
         }
 
-        // ---------------- AI API Key 管理（多 Key + 热加载） ----------------
+        // ---------------- AI API Key 管理 + 用量统计 ----------------
         function escapeHtml(s) {
             return String(s == null ? '' : s)
                 .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
                 .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+        }
+
+        function formatNum(n) {
+            n = Number(n) || 0;
+            return n.toLocaleString('en-US');
+        }
+
+        function formatLastUsed(ts) {
+            if (!ts) return '<span style="color:var(--text-muted);">—</span>';
+            const d = new Date(ts * 1000);
+            const now = Date.now() / 1000;
+            const diff = now - ts;
+            let rel;
+            if (diff < 60)        rel = Math.floor(diff) + ' 秒前';
+            else if (diff < 3600) rel = Math.floor(diff / 60) + ' 分钟前';
+            else if (diff < 86400) rel = Math.floor(diff / 3600) + ' 小时前';
+            else                   rel = Math.floor(diff / 86400) + ' 天前';
+            return `<span title="${d.toLocaleString()}">${rel}</span>`;
         }
 
         async function fetchKeys() {
@@ -972,23 +1003,31 @@
                 }
                 if (data.keys && data.keys.length > 0) {
                     tbody.innerHTML = data.keys.map(k => {
-                        const sourceBadge = k.source === 'env'
-                            ? '<span class="badge warn" style="font-size:11px;">环境变量</span>'
-                            : '<span class="badge" style="font-size:11px;">WebUI</span>';
-                        const ctime = k.created_at ? new Date(k.created_at * 1000).toLocaleString() : '—';
+                        let sourceBadge;
+                        if (k.source === 'env')        sourceBadge = '<span class="badge warn" style="font-size:11px;">环境变量</span>';
+                        else if (k.source === 'anonymous') sourceBadge = '<span class="badge warn" style="font-size:11px;">未鉴权</span>';
+                        else                            sourceBadge = '<span class="badge" style="font-size:11px;">WebUI</span>';
+                        const u = k.usage || {requests_total:0, requests_succeeded:0, requests_failed:0, prompt_tokens:0, completion_tokens:0, last_used_at:null};
+                        const failColor = u.requests_failed > 0 ? 'color:#DC2626;' : 'color:var(--text-muted);';
+                        const totalColor = u.requests_total > 0 ? 'color:var(--primary);font-weight:600;' : 'color:var(--text-muted);';
                         const delBtn = k.deletable
                             ? `<button class="btn btn-danger" style="font-size:12px; padding:6px 12px;" onclick="deleteKey('${escapeHtml(k.id)}')">删除</button>`
-                            : '<span style="color:var(--text-muted); font-size:12px;">不可删除</span>';
+                            : '<span style="color:var(--text-muted); font-size:12px;">—</span>';
                         return `<tr>
                             <td>${escapeHtml(k.name) || '<span style="color:var(--text-muted)">(未命名)</span>'}</td>
                             <td><code style="font-family:monospace; font-size:13px; color:#1e1b4b;">${escapeHtml(k.masked)}</code></td>
                             <td>${sourceBadge}</td>
-                            <td style="font-size:12px; color:var(--text-muted);">${ctime}</td>
+                            <td style="text-align:right; ${totalColor} font-variant-numeric:tabular-nums;">${formatNum(u.requests_total)}</td>
+                            <td style="text-align:right; color:#047857; font-variant-numeric:tabular-nums;">${formatNum(u.requests_succeeded)}</td>
+                            <td style="text-align:right; ${failColor} font-variant-numeric:tabular-nums;">${formatNum(u.requests_failed)}</td>
+                            <td style="text-align:right; font-variant-numeric:tabular-nums;">${formatNum(u.prompt_tokens)}</td>
+                            <td style="text-align:right; font-variant-numeric:tabular-nums;">${formatNum(u.completion_tokens)}</td>
+                            <td style="font-size:12px;">${formatLastUsed(u.last_used_at)}</td>
                             <td>${delBtn}</td>
                         </tr>`;
                     }).join('');
                 } else {
-                    tbody.innerHTML = '<tr><td colspan="5" class="empty-state">尚未配置任何 Key（AI 接口未启用鉴权，所有 /v1/* 请求直通）</td></tr>';
+                    tbody.innerHTML = '<tr><td colspan="10" class="empty-state">尚未配置任何 Key（AI 接口未启用鉴权，所有 /v1/* 请求直通）</td></tr>';
                 }
             } catch (e) {
                 if (e.message !== 'UNAUTHORIZED') console.error('加载 Key 列表失败', e);

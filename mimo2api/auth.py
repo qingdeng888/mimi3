@@ -160,6 +160,24 @@ def verify_ai_api_key(candidate: str | None) -> bool:
     return valid
 
 
+def identify_ai_api_key(candidate: str | None) -> str:
+    """识别 candidate 对应的 Key 标识，用于按 Key 维度的用量统计。
+
+    返回值：
+      - ``"env"``：匹配 ``MIMO_RELAY_OPENAI_KEY`` 环境变量配置的 Key
+      - ``"k_xxx"``：匹配 ``api_keys.json`` 文件中该 id 对应的 Key
+      - ``"anonymous"``：未启用鉴权直通流量，或 candidate 为空 / 不匹配任何已配置 Key
+    """
+    if candidate:
+        env_key = _read_env(AI_AUTH_ENV)
+        if env_key and secrets.compare_digest(candidate, env_key):
+            return "env"
+        for item in _load_extra_ai_keys():
+            if secrets.compare_digest(candidate, item["key"]):
+                return item["id"] or "anonymous"
+    return "anonymous"
+
+
 def require_ai_request(request: Request) -> JSONResponse | None:
     if not is_ai_auth_enabled():
         return None
