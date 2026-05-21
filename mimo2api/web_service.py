@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import binascii
+import hmac
 import json
 import logging
 import time
@@ -213,6 +214,14 @@ NODE_401_COOLDOWN_SECONDS = int(os.getenv("MIMO_NODE_401_COOLDOWN_SECONDS", "900
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PROCESS_LOCK_PATH = os.getenv("MIMO_PROCESS_LOCK_PATH", os.path.join(ROOT_DIR, "mimo2api.lock"))
 
+# /ws 桥接共享密钥：设置后 Claw 节点必须通过 ?token=xxx 或 X-Bridge-Token 头才能连入。
+# 留空 = 关闭鉴权（向后兼容）。建议在公网/反代部署时务必设置一个长随机串。
+WS_BRIDGE_TOKEN = os.getenv("MIMO_WS_BRIDGE_TOKEN", "").strip()
+if WS_BRIDGE_TOKEN:
+    logger.info("🔐 /ws 桥接鉴权已启用 (MIMO_WS_BRIDGE_TOKEN)")
+else:
+    logger.warning("⚠️ /ws 桥接未启用鉴权，建议在公网部署时设置 MIMO_WS_BRIDGE_TOKEN")
+
 # 后台 fire-and-forget 任务集合
 _background_tasks: set[asyncio.Task] = set()
 PROCESS_LOCK_SIZE = 1
@@ -369,8 +378,21 @@ async def api_delete_model_mapping(model_name: str):
 
 @app.websocket("/ws")
 async def ws_tunnel(ws: WebSocket):
-    await ws.accept()
     client_addr = f"{ws.client.host}:{ws.client.port}" if ws.client else "Unknown"
+
+    # 鉴权：当配置了 MIMO_WS_BRIDGE_TOKEN 时，要求 query 中带 ?token= 或 header X-Bridge-Token
+    # 不通过 → 在 accept 前直接关闭，避免被扫描器/未授权方占用 active_clients 池。
+    if WS_BRIDGE_TOKEN:
+        provided = ws.query_params.get("token") or ws.headers.get("x-bridge-token", "")
+        if not provided or not hmac.compare_digest(provided.encode(), WS_BRIDGE_TOKEN.encode()):
+            logger.warning(f"🚫 拒绝未鉴权的 /ws 连接: {client_addr}")
+            try:
+                await ws.close(code=1008)  # Policy Violation
+            except Exception:
+                pass
+            return
+
+    await ws.accept()
     state.active_clients.append(ws)
     state.client_cooldowns.pop(id(ws), None)
     logger.info(f"✅ 内网节点已接入: {client_addr}。当前在线节点数: {len(state.active_clients)}")
