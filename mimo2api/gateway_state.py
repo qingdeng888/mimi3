@@ -46,6 +46,9 @@ class GatewayState:
                 "completion_tokens": 0,
                 "total_tokens": 0,
             },
+            # 按 AI API Key 维度统计的用量（key_id -> 计数器）
+            # key_id："env" / "k_xxx" / "anonymous"（未启用鉴权时的直通流量）
+            "keys": {},
         }
 
 state = GatewayState()

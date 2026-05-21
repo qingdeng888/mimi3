@@ -488,8 +488,30 @@ def _mask_api_key(raw_key: str) -> str:
 
 @router.get("/api/keys")
 async def api_keys_list():
-    """列出当前所有 AI API Key（环境变量 + WebUI 文件）。返回都是脱敏 preview。"""
+    """列出当前所有 AI API Key（环境变量 + WebUI 文件）。返回都是脱敏 preview。
+
+    每条 Key 还会附带按 Key 维度统计的实时用量数据：
+      - ``usage.requests_total / requests_succeeded / requests_failed``
+      - ``usage.prompt_tokens / completion_tokens / total_tokens``
+      - ``usage.last_used_at``（最近一次命中该 Key 的 Unix 时间戳，未使用则为 None）
+
+    若网关曾在 "未启用鉴权" 模式下处理过流量，会额外返回一条 ``id="anonymous"``、
+    ``source="anonymous"`` 的合计行，便于运维感知未鉴权直通的情况。
+    """
     items: list[dict] = []
+    keys_metrics = state.metrics.get("keys", {}) or {}
+
+    def _usage_for(key_id: str) -> dict:
+        kv = keys_metrics.get(key_id) or {}
+        return {
+            "requests_total": int(kv.get("requests_total", 0)),
+            "requests_succeeded": int(kv.get("requests_succeeded", 0)),
+            "requests_failed": int(kv.get("requests_failed", 0)),
+            "prompt_tokens": int(kv.get("prompt_tokens", 0)),
+            "completion_tokens": int(kv.get("completion_tokens", 0)),
+            "total_tokens": int(kv.get("total_tokens", 0)),
+            "last_used_at": int(kv.get("last_used_at", 0)) or None,
+        }
 
     env_key = os.getenv(AI_AUTH_ENV, "").strip()
     if env_key:
@@ -500,9 +522,11 @@ async def api_keys_list():
             "source": "env",
             "deletable": False,
             "created_at": None,
+            "usage": _usage_for("env"),
         })
 
-    for k in _load_extra_ai_keys():
+    file_keys = _load_extra_ai_keys()
+    for k in file_keys:
         items.append({
             "id": k.get("id"),
             "name": k.get("name") or "",
@@ -510,10 +534,24 @@ async def api_keys_list():
             "source": "file",
             "deletable": True,
             "created_at": k.get("created_at") or None,
+            "usage": _usage_for(k.get("id") or ""),
+        })
+
+    # 仅在 anonymous 通道实际产生过流量时才加入合计行，避免空列污染 UI
+    anonymous_usage = _usage_for("anonymous")
+    if anonymous_usage["requests_total"] > 0:
+        items.append({
+            "id": "anonymous",
+            "name": "未鉴权直通流量 (anonymous)",
+            "masked": "—",
+            "source": "anonymous",
+            "deletable": False,
+            "created_at": None,
+            "usage": anonymous_usage,
         })
 
     return JSONResponse({
-        "ai_auth_enabled": bool(items),
+        "ai_auth_enabled": bool(env_key) or bool(file_keys),
         "env_key_set": bool(env_key),
         "keys": items,
         "config_file": AI_KEYS_CONFIG_FILE,

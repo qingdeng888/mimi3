@@ -41,7 +41,9 @@ from .audio_helpers import (
     map_openai_tts_voice,
 )
 from .auth import (
+    extract_ai_api_key,
     get_webui_username,
+    identify_ai_api_key,
     is_ai_auth_enabled,
     is_web_auth_enabled,
     require_ai_request,
@@ -161,6 +163,9 @@ async def auth_middleware(request: Request, call_next):
         auth_error = require_ai_request(request)
         if auth_error is not None:
             return auth_error
+        # 鉴权放行后，识别本次请求所用 Key 的 id（用于按 Key 维度的用量统计）。
+        # 未启用鉴权 / 未携带 / 不匹配任何已配置 Key 时，统一计入 "anonymous"。
+        request.state.api_key_id = identify_ai_api_key(extract_ai_api_key(request))
 
     if is_webui_route(path):
         auth_error = require_webui_request(request)
@@ -581,7 +586,7 @@ async def collect_response_body(current_req_id: str, current_queue: asyncio.Queu
 # -------------- API 路由定义 --------------
 
 @app.post("/v1/audio/speech")
-async def audio_speech_handler(payload: AudioSpeechRequest):
+async def audio_speech_handler(payload: AudioSpeechRequest, request: Request):
     if not state.active_clients:
         return Response("Gateway Error: 没有可用的内网节点", status_code=503)
 
@@ -608,7 +613,8 @@ async def audio_speech_handler(payload: AudioSpeechRequest):
     retry_state = RetryState()
     route_key = "/v1/audio/speech"
     request_started_at = time.monotonic()
-    record_request_started(route_key, is_streaming=False)
+    api_key_id = getattr(request.state, "api_key_id", None)
+    record_request_started(route_key, is_streaming=False, api_key_id=api_key_id)
 
     for attempt in range(max_retries):
         req_id = "unknown"
@@ -627,18 +633,18 @@ async def audio_speech_handler(payload: AudioSpeechRequest):
             if status_code >= 400:
                 record_error(route_key, status_code, f"上游返回 {status_code}", detail=raw_body[:500])
                 content_type, response_headers = normalize_response_headers(first_msg.get("headers", {}))
-                record_request_finished(route_key=route_key, status_code=status_code, started_at=request_started_at, first_byte_at=first_byte_at, success=False)
+                record_request_finished(route_key=route_key, status_code=status_code, started_at=request_started_at, first_byte_at=first_byte_at, success=False, api_key_id=api_key_id)
                 return Response(raw_body, status_code=status_code, media_type=content_type, headers=response_headers)
 
             try:
                 response_json = json.loads(raw_body)
             except json.JSONDecodeError:
-                record_request_finished(route_key=route_key, status_code=502, started_at=request_started_at, first_byte_at=first_byte_at, success=False)
+                record_request_finished(route_key=route_key, status_code=502, started_at=request_started_at, first_byte_at=first_byte_at, success=False, api_key_id=api_key_id)
                 return JSONResponse({"error": {"message": "上游 TTS 返回了非法 JSON"}}, status_code=502)
 
             audio_b64, actual_format = extract_audio_payload(response_json)
             if not audio_b64:
-                record_request_finished(route_key=route_key, status_code=502, started_at=request_started_at, first_byte_at=first_byte_at, success=False)
+                record_request_finished(route_key=route_key, status_code=502, started_at=request_started_at, first_byte_at=first_byte_at, success=False, api_key_id=api_key_id)
                 return JSONResponse({"error": {"message": "上游 TTS 响应里没有音频数据"}}, status_code=502)
 
             try:
@@ -647,10 +653,10 @@ async def audio_speech_handler(payload: AudioSpeechRequest):
                 try:
                     audio_bytes = base64.b64decode(audio_b64)
                 except (binascii.Error, TypeError):
-                    record_request_finished(route_key=route_key, status_code=502, started_at=request_started_at, first_byte_at=first_byte_at, success=False)
+                    record_request_finished(route_key=route_key, status_code=502, started_at=request_started_at, first_byte_at=first_byte_at, success=False, api_key_id=api_key_id)
                     return JSONResponse({"error": {"message": "上游 TTS 音频数据损坏"}}, status_code=502)
 
-            record_request_finished(route_key=route_key, status_code=200, started_at=request_started_at, first_byte_at=first_byte_at, success=True)
+            record_request_finished(route_key=route_key, status_code=200, started_at=request_started_at, first_byte_at=first_byte_at, success=True, api_key_id=api_key_id)
             return Response(audio_bytes, media_type=audio_media_type((actual_format or payload.response_format).lower()))
 
         except asyncio.TimeoutError:
@@ -667,7 +673,7 @@ async def audio_speech_handler(payload: AudioSpeechRequest):
             cleanup_pending_request(req_id)
             raise e
 
-    record_request_finished(route_key=route_key, status_code=retry_state.status_code, started_at=request_started_at, first_byte_at=None, success=False)
+    record_request_finished(route_key=route_key, status_code=retry_state.status_code, started_at=request_started_at, first_byte_at=None, success=False, api_key_id=api_key_id)
     return Response(retry_state.response_text, status_code=retry_state.status_code)
 
 @app.post("/v1/responses")
@@ -697,7 +703,8 @@ async def responses_handler(request: Request):
     retry_state = RetryState()
     route_key = "/v1/responses"
     request_started_at = time.monotonic()
-    record_request_started(route_key, is_streaming=is_streaming)
+    api_key_id = getattr(request.state, "api_key_id", None)
+    record_request_started(route_key, is_streaming=is_streaming, api_key_id=api_key_id)
 
     for attempt in range(max_retries):
         req_id = "unknown"
@@ -715,7 +722,7 @@ async def responses_handler(request: Request):
                 content_type, response_headers = normalize_response_headers(first_msg.get("headers", {}))
                 raw_body = await collect_response_body(req_id, queue)
                 record_error("/v1/responses", status_code, f"上游返回 {status_code}", detail=raw_body[:500])
-                record_request_finished(route_key=route_key, status_code=status_code, started_at=request_started_at, first_byte_at=first_byte_at, success=False)
+                record_request_finished(route_key=route_key, status_code=status_code, started_at=request_started_at, first_byte_at=first_byte_at, success=False, api_key_id=api_key_id)
                 return Response(raw_body, status_code=status_code, media_type=content_type, headers=response_headers)
 
             if is_streaming:
@@ -766,7 +773,7 @@ async def responses_handler(request: Request):
                         await asyncio.gather(data_task, keepalive_task, return_exceptions=True)
                         cleanup_pending_request(current_req_id)
                         usage_obj = getattr(converter, "_usage", None)
-                        record_request_finished(route_key=route_key, status_code=status_code if stream_succeeded else 502, started_at=request_started_at, first_byte_at=first_byte_at, success=stream_succeeded, usage=usage_obj.model_dump() if usage_obj else None)
+                        record_request_finished(route_key=route_key, status_code=status_code if stream_succeeded else 502, started_at=request_started_at, first_byte_at=first_byte_at, success=stream_succeeded, usage=usage_obj.model_dump() if usage_obj else None, api_key_id=api_key_id)
 
                 return StreamingResponse(
                     responses_stream_generator(req_id, queue),
@@ -779,11 +786,11 @@ async def responses_handler(request: Request):
                 try:
                     chat_resp = json.loads(raw_body)
                 except json.JSONDecodeError:
-                    record_request_finished(route_key=route_key, status_code=502, started_at=request_started_at, first_byte_at=first_byte_at, success=False)
+                    record_request_finished(route_key=route_key, status_code=502, started_at=request_started_at, first_byte_at=first_byte_at, success=False, api_key_id=api_key_id)
                     return JSONResponse({"error": {"message": "上游返回了非法 JSON"}}, status_code=502)
 
                 responses_resp = responses_convert_response(chat_resp)
-                record_request_finished(route_key=route_key, status_code=status_code, started_at=request_started_at, first_byte_at=first_byte_at, success=True, usage=chat_resp.get("usage"))
+                record_request_finished(route_key=route_key, status_code=status_code, started_at=request_started_at, first_byte_at=first_byte_at, success=True, usage=chat_resp.get("usage"), api_key_id=api_key_id)
                 return JSONResponse(content=responses_resp)
 
         except asyncio.TimeoutError:
@@ -795,7 +802,7 @@ async def responses_handler(request: Request):
             cleanup_pending_request(req_id)
             raise e
 
-    record_request_finished(route_key=route_key, status_code=retry_state.status_code, started_at=request_started_at, first_byte_at=None, success=False)
+    record_request_finished(route_key=route_key, status_code=retry_state.status_code, started_at=request_started_at, first_byte_at=None, success=False, api_key_id=api_key_id)
     return Response(retry_state.response_text, status_code=retry_state.status_code)
 
 _MODELS = [
@@ -854,13 +861,14 @@ async def _forward_request(request: Request, path: str):
     body_text = apply_model_mapping(body_text)
     route_key = path
     request_started_at = time.monotonic()
+    api_key_id = getattr(request.state, "api_key_id", None)
 
     is_streaming = False
     try:
         is_streaming = json.loads(body_text).get("stream", False) is True
     except (json.JSONDecodeError, AttributeError):
         pass
-    record_request_started(route_key, is_streaming=is_streaming)
+    record_request_started(route_key, is_streaming=is_streaming, api_key_id=api_key_id)
 
     for attempt in range(max_retries):
         req_id = "unknown"
@@ -921,7 +929,7 @@ async def _forward_request(request: Request, path: str):
                         keepalive_task.cancel()
                     await asyncio.gather(*[t for t in (data_task, keepalive_task) if t is not None], return_exceptions=True)
                     cleanup_pending_request(current_req_id)
-                    record_request_finished(route_key=route_key, status_code=status_code if stream_succeeded else 502, started_at=request_started_at, first_byte_at=first_byte_at, success=stream_succeeded and status_code < 400, usage=usage_data)
+                    record_request_finished(route_key=route_key, status_code=status_code if stream_succeeded else 502, started_at=request_started_at, first_byte_at=first_byte_at, success=stream_succeeded and status_code < 400, usage=usage_data, api_key_id=api_key_id)
 
             if status_code >= 400:
                 record_error(route_key, status_code, f"上游返回 {status_code}", detail=first_msg.get("body", "")[:300])
@@ -937,7 +945,7 @@ async def _forward_request(request: Request, path: str):
             cleanup_pending_request(req_id)
             raise e
 
-    record_request_finished(route_key=route_key, status_code=retry_state.status_code, started_at=request_started_at, first_byte_at=None, success=False)
+    record_request_finished(route_key=route_key, status_code=retry_state.status_code, started_at=request_started_at, first_byte_at=None, success=False, api_key_id=api_key_id)
     return Response(retry_state.response_text, status_code=retry_state.status_code)
 
 if __name__ == "__main__":

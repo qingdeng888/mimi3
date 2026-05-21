@@ -62,7 +62,23 @@ def _ensure_node_metrics(node_key: str) -> dict[str, Any]:
     return nodes[node_key]
 
 
-def record_request_started(route_key: str, is_streaming: bool) -> None:
+def _ensure_key_metrics(api_key_id: str) -> dict[str, Any]:
+    """获取/初始化某条 Key 的用量计数器（按 key_id 维度）。"""
+    keys = state.metrics.setdefault("keys", {})
+    if api_key_id not in keys:
+        keys[api_key_id] = {
+            "requests_total": 0,
+            "requests_succeeded": 0,
+            "requests_failed": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "last_used_at": 0,
+        }
+    return keys[api_key_id]
+
+
+def record_request_started(route_key: str, is_streaming: bool, api_key_id: str | None = None) -> None:
     metrics = state.metrics
     route_metrics = _ensure_route_metrics(route_key)
 
@@ -75,6 +91,11 @@ def record_request_started(route_key: str, is_streaming: bool) -> None:
     else:
         metrics["non_streaming_requests"] += 1
         route_metrics["non_streaming_requests"] += 1
+
+    if api_key_id:
+        key_metrics = _ensure_key_metrics(api_key_id)
+        key_metrics["requests_total"] += 1
+        key_metrics["last_used_at"] = int(time.time())
 
 
 def record_attempt_started(target_ws: WebSocket) -> None:
@@ -104,7 +125,7 @@ def record_attempt_finished(
     _bump_counter(node_metrics["status_codes"], str(status_code))
 
 
-def record_usage(route_key: str, usage: dict[str, Any] | None) -> None:
+def record_usage(route_key: str, usage: dict[str, Any] | None, api_key_id: str | None = None) -> None:
     if not isinstance(usage, dict):
         return
 
@@ -130,6 +151,12 @@ def record_usage(route_key: str, usage: dict[str, Any] | None) -> None:
     route_tokens["prompt_tokens"] += prompt_tokens
     route_tokens["completion_tokens"] += completion_tokens
     route_tokens["total_tokens"] += total_tokens
+
+    if api_key_id:
+        key_metrics = _ensure_key_metrics(api_key_id)
+        key_metrics["prompt_tokens"] += prompt_tokens
+        key_metrics["completion_tokens"] += completion_tokens
+        key_metrics["total_tokens"] += total_tokens
 
 
 def percentile_from_samples(samples: list[float], ratio: float) -> float:
@@ -194,6 +221,7 @@ def record_request_finished(
     first_byte_at: float | None,
     success: bool,
     usage: dict[str, Any] | None = None,
+    api_key_id: str | None = None,
 ) -> None:
     metrics = state.metrics
     route_metrics = _ensure_route_metrics(route_key)
@@ -218,8 +246,16 @@ def record_request_finished(
     _bump_counter(metrics["status_codes"], str(status_code))
     _bump_counter(route_metrics["status_codes"], str(status_code))
 
+    if api_key_id:
+        key_metrics = _ensure_key_metrics(api_key_id)
+        if success:
+            key_metrics["requests_succeeded"] += 1
+        else:
+            key_metrics["requests_failed"] += 1
+        key_metrics["last_used_at"] = int(time.time())
+
     if usage:
-        record_usage(route_key, usage)
+        record_usage(route_key, usage, api_key_id=api_key_id)
 
 
 def capture_metrics_snapshot() -> dict[str, Any]:
@@ -598,6 +634,19 @@ def build_gateway_stats(background_tasks_count: int) -> dict[str, Any]:
     request_total = int(metrics["requests_total"])
     attempt_total = int(metrics["attempts_total"])
     token_metrics = metrics["tokens"]
+
+    keys_usage: dict[str, Any] = {}
+    for key_id, kv in metrics.get("keys", {}).items():
+        keys_usage[key_id] = {
+            "requests_total": int(kv.get("requests_total", 0)),
+            "requests_succeeded": int(kv.get("requests_succeeded", 0)),
+            "requests_failed": int(kv.get("requests_failed", 0)),
+            "prompt_tokens": int(kv.get("prompt_tokens", 0)),
+            "completion_tokens": int(kv.get("completion_tokens", 0)),
+            "total_tokens": int(kv.get("total_tokens", 0)),
+            "last_used_at": int(kv.get("last_used_at", 0)) or None,
+        }
+
     return {
         "uptime_seconds": int(now - state.metrics_started_at),
         "active_clients": len(state.active_clients),
@@ -638,6 +687,7 @@ def build_gateway_stats(background_tasks_count: int) -> dict[str, Any]:
         },
         "routes": routes,
         "nodes": nodes,
+        "keys": keys_usage,
     }
 
 
@@ -667,6 +717,7 @@ def save_cumulative_metrics() -> None:
         },
         "routes": {},
         "nodes": {},
+        "keys": {},
     }
     for rk, rv in m["routes"].items():
         data["routes"][rk] = {
@@ -688,6 +739,16 @@ def save_cumulative_metrics() -> None:
             "latency_sum_ms": float(nv["latency_sum_ms"]),
             "first_byte_latency_sum_ms": float(nv["first_byte_latency_sum_ms"]),
             "status_codes": dict(nv["status_codes"]),
+        }
+    for kid, kv in m.get("keys", {}).items():
+        data["keys"][kid] = {
+            "requests_total": int(kv.get("requests_total", 0)),
+            "requests_succeeded": int(kv.get("requests_succeeded", 0)),
+            "requests_failed": int(kv.get("requests_failed", 0)),
+            "prompt_tokens": int(kv.get("prompt_tokens", 0)),
+            "completion_tokens": int(kv.get("completion_tokens", 0)),
+            "total_tokens": int(kv.get("total_tokens", 0)),
+            "last_used_at": int(kv.get("last_used_at", 0)),
         }
     tmp = METRICS_SNAPSHOT_PATH + ".tmp"
     try:
@@ -740,5 +801,10 @@ def load_cumulative_metrics() -> bool:
                 node["status_codes"] = val
             else:
                 node[key] = val
+
+    for kid, kv in data.get("keys", {}).items():
+        key_metrics = _ensure_key_metrics(kid)
+        for key, val in kv.items():
+            key_metrics[key] = val
 
     return True
