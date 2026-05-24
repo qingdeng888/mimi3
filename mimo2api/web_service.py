@@ -563,8 +563,10 @@ def cooldown_client(ws: WebSocket, seconds: int, reason: str) -> None:
             f"判定为坏号 → 主动断开该节点并触发{scope_label}。"
         )
         # 主动断开该 WS：finally 段会清理 active_clients / cooldown / 计数器 / uid_map
+        # _track_task：用全局集合持有 task 引用，避免 Py 3.11+ 出现 "Task was destroyed but it is pending"
+        # 警告（fire-and-forget 任务必须有外部强引用，否则可能被 GC 中途取消，close 帧来不及发出）。
         try:
-            asyncio.create_task(ws.close(code=1000))
+            _track_task(asyncio.create_task(ws.close(code=1000)))
         except Exception:
             pass
     else:

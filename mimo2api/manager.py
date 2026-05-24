@@ -119,11 +119,36 @@ def load_disabled_accounts() -> dict[str, dict]:
     return {}
 
 
+def atomic_write_json(path: str, data) -> None:
+    """原子化写入 JSON 文件，对外暴露给 ui_router 等共用。
+
+    实现：先写到 ``path + ".tmp"``，flush + fsync 落盘后再 ``os.replace``。
+    任何中途崩溃只会留下 .tmp 残骸，原文件保持完好（POSIX rename 保证原子）。
+    若不原子化，写一半进程被 kill 会留下破损 JSON → 下次 load 静默 except
+    把整张表当空表，造成「禁用账号被静默复活」「Key 列表全丢」等业务事故。
+
+    任何调用方都应该捕获本函数抛出的 OSError 自行决定是否上报，
+    本函数自身不吞异常（与历史 ``save_*`` 简单 ``try/except: log`` 不同）。
+    """
+    parent = os.path.dirname(os.path.abspath(path))
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    tmp_path = path + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+        f.flush()
+        try:
+            os.fsync(f.fileno())
+        except OSError:
+            # 某些虚拟文件系统不支持 fsync，让步即可
+            pass
+    os.replace(tmp_path, path)
+
+
 def save_disabled_accounts(data: dict[str, dict]):
-    """持久化禁用列表到 disabled_accounts.json"""
+    """持久化禁用列表到 disabled_accounts.json（原子写）"""
     try:
-        with open(DISABLED_ACCOUNTS_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        atomic_write_json(DISABLED_ACCOUNTS_FILE, data)
     except Exception as e:
         logger.error(f"保存禁用列表失败: {e}")
 
@@ -788,6 +813,10 @@ class AccountManager:
                             rebuild_event.clear()
                         continue
                     else:
+                        # 路径 A 重连失败 fallthrough 到 path B：必须先关闭已部分初始化的 client
+                        # （ws 可能已建立但 hello-ok 超时，_listen_task 还在跑），否则会一直泄漏
+                        # 直到下面 client = NativeClawClient(...) 重赋时才被 GC，期间 ws 资源占用没释放。
+                        await client.close()
                         self.logger.warning("虽然状态显示 AVAILABLE，但免重建重连失败！继续走全量摧毁新建流程...")
                 
                 # 1. 尝试主动销毁（残血或掉线的，均执行主动清场重来）
@@ -835,8 +864,13 @@ class AccountManager:
                 reply1 = await client.send_message(reset_cmd, timeout=120)
                 self.logger.info(f"[收到的重置反馈回复]: {reply1}")
 
-                self.logger.info("强制等待 Claw 服务端反向重启断联 (15s)...")
-                await asyncio.sleep(15)
+                self.logger.info("强制等待 Claw 服务端反向重启断联 (15s，可被重建信号提前唤醒)...")
+                # ⚠️ 这段 sleep 是流程内部依赖等待（reset_cmd 触发服务端反向重启需要时间落地），
+                # 不是空闲休眠。即使被信号唤醒提前结束，**也不能跳过下面的 step 4 重连流程**——
+                # 必须继续走完 connect_with_retry → 注入 bridge，否则当前轮重建会半途而废。
+                # 这里只把"不可中断"改成"可被信号唤醒提前返回"，节省最多 15s 等待时间，
+                # 后续 step 4 / inject 流程照常执行；外部信号会在最后的 wait_time sleep 中被消化。
+                await self._interruptible_sleep_dual(15)
 
                 self.logger.info("清扫刚才的断裂残留并让路...")
                 await client.close()

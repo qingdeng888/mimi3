@@ -30,6 +30,77 @@ router = APIRouter()
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 USERS_DIR = os.path.join(ROOT_DIR, "users")
 
+# ----------------- uid -> 备注名 缓存（仅供 /api/clients 高频展示用） -----------------
+# WebUI 节点列表会以 ~3s 间隔轮询 /api/clients，每次都全量 listdir + 多次 open 较浪费 IO。
+# 这里加一个进程内 TTL 缓存（10s 即可，备注名变更后下一次轮询就能感知，无需主动 invalidate）。
+# 注意：仅对**展示**生效；状态查询、禁用、重建等关键路径仍直接从磁盘读，避免缓存延迟带来副作用。
+_USER_ALIAS_CACHE_TTL = 10.0  # seconds
+_user_alias_cache: dict[str, str] = {}
+_user_alias_cache_loaded_at: float = 0.0
+
+
+def _load_user_aliases_cached() -> dict[str, str]:
+    """返回 uid -> 备注名（name 字段）的字典；进程内 TTL 缓存。
+
+    任何 IO 失败一律静默退化为上次的缓存或空 dict，保证调用方（/api/clients）的可用性
+    永远高于"展示是否好看"。
+    """
+    global _user_alias_cache, _user_alias_cache_loaded_at
+    now = time.monotonic()
+    if _user_alias_cache_loaded_at and (now - _user_alias_cache_loaded_at) < _USER_ALIAS_CACHE_TTL:
+        return _user_alias_cache
+    fresh: dict[str, str] = {}
+    try:
+        if os.path.isdir(USERS_DIR):
+            for fn in os.listdir(USERS_DIR):
+                if fn.startswith("user_") and fn.endswith(".json"):
+                    fp = os.path.join(USERS_DIR, fn)
+                    try:
+                        with open(fp, "r", encoding="utf-8") as f:
+                            udata = json.load(f) or {}
+                        u = str(udata.get("userId", "")).strip()
+                        n = str(udata.get("name", "") or "").strip()
+                        if u:
+                            fresh[u] = n
+                    except Exception:
+                        # 损坏的单个 user_*.json 不影响其他账号显示
+                        continue
+    except Exception:
+        # 整个目录扫描失败 → 保留旧缓存（兜底优先）
+        return _user_alias_cache
+    _user_alias_cache = fresh
+    _user_alias_cache_loaded_at = now
+    return _user_alias_cache
+
+
+def _invalidate_user_alias_cache() -> None:
+    """让下一次 /api/clients 立即重新读盘（用于 rename / add / delete 后保证 UI 即时反映）。"""
+    global _user_alias_cache_loaded_at
+    _user_alias_cache_loaded_at = 0.0
+
+
+# ----------------- 后台 close 任务集合（fire-and-forget） -----------------
+# 网关侧主动关闭 ws 的场景（disconnect API、cooldown 升级踢除等）不应该让 await close
+# 把请求 worker 卡死——半死 ws 的关闭帧可能要走完 TCP 重传定时器才能返回。
+# 用全局集合持强引用，避免 Py 3.11+ 出现 "Task was destroyed but it is pending"。
+_ws_close_tasks: set[asyncio.Task] = set()
+
+
+def _fire_and_forget_close(ws, code: int = 1000) -> None:
+    """异步发起 ws.close(code) 但不等待，调用方立即返回。"""
+    async def _do_close():
+        try:
+            await ws.close(code=code)
+        except Exception:
+            # 已关闭 / 半死状态都吞掉，调用方关心的语义只是"我已经把信号发出去了"
+            pass
+    try:
+        task = asyncio.create_task(_do_close())
+        _ws_close_tasks.add(task)
+        task.add_done_callback(_ws_close_tasks.discard)
+    except Exception:
+        pass
+
 
 @router.get("/")
 async def root_page():
@@ -179,16 +250,27 @@ async def api_users_add(request: Request):
             
         os.makedirs(USERS_DIR, exist_ok=True)
         target_file = os.path.join(USERS_DIR, f"user_{uid}.json")
-        
+
+        # 已存在该 uid → 保留原有的备注名等可编辑字段（仅刷新凭证），避免覆盖用户手工设置的 name。
+        existing_name = None
+        if os.path.exists(target_file):
+            try:
+                with open(target_file, "r", encoding="utf-8") as _f:
+                    _old = json.load(_f) or {}
+                existing_name = (_old.get("name") or "").strip() or None
+            except Exception:
+                existing_name = None
+
         user_data = {
             "userId": uid,
             "serviceToken": st,
             "xiaomichatbot_ph": ph,
-            "name": f"Imported_{uid}"
+            "name": existing_name or f"Imported_{uid}",
         }
-        with open(target_file, "w", encoding="utf-8") as f:
-            json.dump(user_data, f, ensure_ascii=False, indent=2)
-            
+        from .manager import atomic_write_json
+        atomic_write_json(target_file, user_data)
+        _invalidate_user_alias_cache()
+
         return JSONResponse({"status": "ok", "userId": uid})
     except Exception as e:
         return JSONResponse({"detail": str(e)}, status_code=500)
@@ -309,8 +391,9 @@ async def api_users_rename(uid: str, request: Request):
         with open(target_file, "r", encoding="utf-8") as f:
             user_data = json.load(f)
         user_data["name"] = new_name
-        with open(target_file, "w", encoding="utf-8") as f:
-            json.dump(user_data, f, ensure_ascii=False, indent=2)
+        from .manager import atomic_write_json
+        atomic_write_json(target_file, user_data)
+        _invalidate_user_alias_cache()
     except Exception as e:
         return JSONResponse({"detail": f"保存失败: {e}"}, status_code=500)
 
@@ -322,6 +405,7 @@ async def api_users_delete(uid: str):
     target_file = os.path.join(USERS_DIR, f"user_{uid}.json")
     if os.path.exists(target_file):
         os.remove(target_file)
+        _invalidate_user_alias_cache()
         return JSONResponse({"status": "ok"})
     return JSONResponse({"detail": "User not found"}, status_code=404)
 
@@ -364,6 +448,20 @@ async def api_users_disable(uid: str):
             await client.post(destroy_url, cookies=cookies, headers=headers, timeout=15)
     except Exception:
         pass  # 销毁失败不影响禁用状态
+
+    # 让该账号的 run_lifecycle 尽快回到 while 顶部检查 disabled，
+    # 而不是等到下一次 sleep（最坏 55min）才感知到自己已被禁用。
+    # signal_rebuild() 通过 _account_managers 注册表精确唤醒该账号的 _rebuild_event，
+    # 任何挂在 _interruptible_sleep_dual 的协程都会立即返回；
+    # 即便此时该 task 正在 destroy/create/send_message 等阻塞调用中，
+    # 这些调用结束后下一次 sleep_dual 立刻被唤醒，也比纯靠时间轮转快得多。
+    try:
+        from .manager import _account_managers
+        mgr = _account_managers.get(str(uid))
+        if mgr is not None:
+            mgr.signal_rebuild()
+    except Exception:
+        pass
 
     return JSONResponse({"status": "ok", "message": f"账号 {uid} 已禁用，Claw 实例已触发销毁"})
 
@@ -424,8 +522,11 @@ async def api_set_proxy(request: Request):
     if proxy_url and not any(proxy_url.startswith(p) for p in ("http://", "https://", "socks5://", "socks4://")):
         return JSONResponse({"detail": "代理格式不正确，需以 http:// / https:// / socks5:// 开头"}, status_code=400)
 
-    with open(PROXY_CONFIG_FILE, "w", encoding="utf-8") as f:
-        json.dump({"proxy_url": proxy_url}, f, ensure_ascii=False, indent=2)
+    try:
+        from .manager import atomic_write_json
+        atomic_write_json(PROXY_CONFIG_FILE, {"proxy_url": proxy_url})
+    except Exception as e:
+        return JSONResponse({"detail": f"保存失败: {e}"}, status_code=500)
 
     return JSONResponse({"status": "ok", "proxy_url": proxy_url, "message": "代理已保存，即时生效"})
 
@@ -477,8 +578,11 @@ async def api_set_xiequ(request: Request):
     if api_url and not api_url.startswith(("http://", "https://")):
         return JSONResponse({"detail": "携趣 API 地址需以 http:// 或 https:// 开头"}, status_code=400)
 
-    with open(XIEQU_CONFIG_FILE, "w", encoding="utf-8") as f:
-        json.dump({"api_url": api_url}, f, ensure_ascii=False, indent=2)
+    try:
+        from .manager import atomic_write_json
+        atomic_write_json(XIEQU_CONFIG_FILE, {"api_url": api_url})
+    except Exception as e:
+        return JSONResponse({"detail": f"保存失败: {e}"}, status_code=500)
 
     return JSONResponse({
         "status": "ok",
@@ -719,26 +823,9 @@ async def api_clients_list():
 
     now = _time.time()
 
-    # 一次性扫描 users/ 目录构建 uid -> 备注名映射，供下面所有节点公用，避免每条节点都做一次 IO。
-    # 失败一律静默退化为空 dict，保证 /api/clients 的可用性永远高于"展示是否好看"。
-    uid_to_name: dict[str, str] = {}
-    try:
-        if os.path.isdir(USERS_DIR):
-            for fn in os.listdir(USERS_DIR):
-                if fn.startswith("user_") and fn.endswith(".json"):
-                    fp = os.path.join(USERS_DIR, fn)
-                    try:
-                        with open(fp, "r", encoding="utf-8") as f:
-                            udata = json.load(f) or {}
-                        u = str(udata.get("userId", "")).strip()
-                        n = str(udata.get("name", "") or "").strip()
-                        if u:
-                            uid_to_name[u] = n
-                    except Exception:
-                        # 损坏的单个 user_*.json 不影响其他账号显示
-                        continue
-    except Exception:
-        pass
+    # uid -> 备注名 映射（10s TTL 缓存，避免 ~3s 一次的 /api/clients 轮询每次都全量扫盘）。
+    # 备注名变更后下一轮自然刷新；rename / add / delete 已显式 invalidate 缓存做即时反映。
+    uid_to_name = _load_user_aliases_cached()
 
     items: list[dict] = []
     # 注意：state.active_clients 列表索引会随删除变化，不能依赖；用 id(ws) 当稳定 key
@@ -796,18 +883,11 @@ async def api_clients_disconnect(client_id: str):
         return JSONResponse({"detail": "该客户端不在当前在线列表中（可能刚刚断开）"}, status_code=404)
 
     addr = f"{target_ws.client.host}:{target_ws.client.port}" if target_ws.client else "Unknown"
-    try:
-        # 1000 = Normal Closure；用 1001 (Going Away) 也可以，按 RFC 6455 都属于"主动关闭"
-        await target_ws.close(code=1000)
-    except Exception as e:
-        # 即便 close 抛异常，ws_tunnel 的 receive_text() 也很快会因 socket 关闭而抛错并进入 finally 清理；
-        # 这里不当致命错误处理。
-        return JSONResponse({
-            "status": "ok",
-            "message": f"已发送关闭帧（伴随异常: {e}），节点 {addr} 将在最迟数秒内被回收",
-        })
-
+    # fire-and-forget close：半死 ws 的关闭帧可能要等 TCP 重传定时器才能返回，直接 await 会
+    # 把请求 worker 卡住数十秒。这里只把"关闭信号"派发出去就立即返回；ws_tunnel 的
+    # finally 段会自然回收 active_clients / cooldown / 孤儿请求队列等所有状态。
+    _fire_and_forget_close(target_ws, code=1000)
     return JSONResponse({
         "status": "ok",
-        "message": f"已主动断开节点 {addr}，连接将在数秒内从 active_clients 列表中移除",
+        "message": f"已派发关闭信号给节点 {addr}，连接将在数秒内从 active_clients 列表中移除",
     })
