@@ -837,9 +837,17 @@ class AccountManager:
                 # 5. 注入核心桥接通信脚本
                 self.logger.info("正解析并注入 mimo2api bridge.py ...")
                 bridge_code = await get_bridge_code(self.uid)
+                # ⚠️ 重要：必须先 kill 容器内残留的旧 bridge 进程，再 nohup 启动新的。
+                # 路径 B 走的是 `reset_cmd` 触发的"反向重启"，该重启通常只重启 Claw 应用本身，
+                # 并不会清理容器内由前一轮 nohup 拉起的后台 bridge.py。如果不显式 kill，
+                # 同一容器会同时存在 2 个 bridge 进程 → 同 uid 两条 /ws 连接 →
+                # WebUI「内网通信节点连接详情」会显示该账号有 2 个节点在线。
+                # （网关侧已加 uid 去重兜底，但源头清理仍是首选，避免无谓重连风暴。）
                 inject_prompt = (
                     "好，帮我安装websockets和httpx。\n"
-                    "然后请用 nohup 后台静默运行以下 Python 资源桥接代码（请务必在后台运行，不要阻塞我们的对话！）：\n"
+                    "然后，请先将当前主机上正在运行（如果有的话）的所有资源桥接脚本进程杀掉"
+                    "（例如寻找并 kill 掉包含 ws:// 连结的后台 python 进程），"
+                    "随后请用 nohup 后台静默运行以下 Python 资源桥接代码（请务必在后台运行，不要阻塞我们的对话！）：\n"
                     "```python\n"
                     f"{bridge_code}\n"
                     "```"
