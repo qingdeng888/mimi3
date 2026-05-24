@@ -693,9 +693,14 @@ async def api_clients_list():
 
     每条返回：
       - ``id``: 字符串形式的 ``id(ws)``，用于断开 API 定位 WS 对象。
+      - ``uid``: 该连接归属的账号 userId（bridge.py 通过 ?uid=... 上报；
+        老版本 bridge 没带此字段则为空字符串）。
       - ``host`` / ``port``: 节点的源 IP 与端口
       - ``connected_at``: Unix 时间戳；``duration_seconds`` 已运行秒数
       - ``in_cooldown`` / ``cooldown_remaining_seconds``: 冷却状态（如 401 触发的临时跳过）
+      - ``cooldown_count``: 该节点累计进入冷却的次数（重连后清零；
+        达到 ``MIMO_NODE_COOLDOWN_REBUILD_THRESHOLD`` 会自动按 uid 触发该账号定向重建，
+        uid 缺失时 fallback 全局重建）
       - ``pending_requests``: 当前正由该节点处理中的请求队列数
       - ``current``: 是否是下一次 round-robin 命中的节点（仅作展示）
     """
@@ -709,10 +714,13 @@ async def api_clients_list():
         connected_at = state.client_connected_at.get(ws_id, 0)
         cooldown_until = state.client_cooldowns.get(ws_id, 0)
         in_cooldown = cooldown_until > now
+        cooldown_count = state.client_cooldown_counts.get(ws_id, 0)
+        bridge_uid = state.client_uid_map.get(ws_id, "")
         host = ws.client.host if ws.client else "Unknown"
         port = ws.client.port if ws.client else 0
         items.append({
             "id": str(ws_id),
+            "uid": bridge_uid,
             "index": index,
             "host": host,
             "port": port,
@@ -722,6 +730,7 @@ async def api_clients_list():
             "in_cooldown": in_cooldown,
             "cooldown_until": int(cooldown_until) if in_cooldown else None,
             "cooldown_remaining_seconds": max(0, int(cooldown_until - now)) if in_cooldown else 0,
+            "cooldown_count": cooldown_count,
             "pending_requests": len(state.ws_to_req_ids.get(ws_id, set())),
             "current": index == state.current_client_index,
         })
