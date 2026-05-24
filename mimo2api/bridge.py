@@ -14,13 +14,24 @@ WS_URL = "__WS_URL__"
 #     导致下发的 bridge 永远不带 token、被服务端 1008 直接拒绝、节点上不了线）。
 BRIDGE_TOKEN = "__BRIDGE_TOKEN__"
 
+# 桥接归属账号 uid 占位符；manager.py 会用 json.dumps(uid) 整体替换 ``"__BRIDGE_UID__"``。
+# 服务端 ws_tunnel 收到 ?uid=... 后会把 (id(ws) -> uid) 映射记入 client_uid_map，
+# 用于「累计冷却 N 次自动单账号重建」时把信号精准下发到对应的 AccountManager，
+# 而不是无差别全局重建拖累其他健康账号。同样限定整文件唯一一处字面量。
+BRIDGE_UID = "__BRIDGE_UID__"
+
 
 def _build_ws_url() -> str:
-    """把 token 以 query 参数的形式拼到 WS_URL 上；token 为空时原样返回。"""
-    if not BRIDGE_TOKEN:
+    """把 token / uid 以 query 参数的形式拼到 WS_URL 上；为空则跳过对应字段。"""
+    qs: list[str] = []
+    if BRIDGE_TOKEN:
+        qs.append(f"token={urllib.parse.quote(BRIDGE_TOKEN, safe='')}")
+    if BRIDGE_UID:
+        qs.append(f"uid={urllib.parse.quote(BRIDGE_UID, safe='')}")
+    if not qs:
         return WS_URL
     sep = "&" if "?" in WS_URL else "?"
-    return f"{WS_URL}{sep}token={urllib.parse.quote(BRIDGE_TOKEN, safe='')}"
+    return f"{WS_URL}{sep}{'&'.join(qs)}"
 
 
 async def safe_send(ws, lock, data):
