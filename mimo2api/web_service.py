@@ -28,7 +28,7 @@ except ImportError:
 MODEL_MAPPING_FILE = Path(__file__).parent.parent / "model_mapping.json"
 
 # 引入 Manager 长驻协程任务
-from .manager import start_manager_tasks, trigger_rebuild
+from .manager import start_manager_tasks, trigger_rebuild, trigger_rebuild_for_uid
 
 # Responses API 转换器
 from .responses_converter import convert_request as responses_convert_request
@@ -399,8 +399,14 @@ async def ws_tunnel(ws: WebSocket):
     state.active_clients.append(ws)
     state.client_cooldowns.pop(id(ws), None)
     state.client_cooldown_counts.pop(id(ws), None)
+    # bridge.py 通过 ?uid=<account_userId> 上报本连接归属哪个账号。
+    # 老版本 bridge 不带此参数时为空字符串，cooldown 升级路径会自动 fallback 全局重建。
+    bridge_uid = ws.query_params.get("uid", "").strip()
+    if bridge_uid:
+        state.client_uid_map[id(ws)] = bridge_uid
     state.client_connected_at[id(ws)] = time.time()
-    logger.info(f"✅ 内网节点已接入: {client_addr}。当前在线节点数: {len(state.active_clients)}")
+    uid_label = f" (uid={bridge_uid})" if bridge_uid else " (uid=未上报/老版bridge)"
+    logger.info(f"✅ 内网节点已接入: {client_addr}{uid_label}。当前在线节点数: {len(state.active_clients)}")
     
     try:
         while True:
@@ -419,6 +425,7 @@ async def ws_tunnel(ws: WebSocket):
             state.active_clients.remove(ws)
         state.client_cooldowns.pop(id(ws), None)
         state.client_cooldown_counts.pop(id(ws), None)
+        state.client_uid_map.pop(id(ws), None)
         state.client_connected_at.pop(id(ws), None)
         
         # 清理该节点的所有孤儿队列
@@ -499,20 +506,31 @@ def cooldown_client(ws: WebSocket, seconds: int, reason: str) -> None:
 
     threshold = NODE_COOLDOWN_REBUILD_THRESHOLD
     if threshold > 0 and count >= threshold:
+        # 优先按 uid 做单账号定向重建（节省其他健康账号），
+        # 只有在拿不到 uid（老版 bridge 不带 ?uid=）或对应 AccountManager 已不存在时
+        # 才 fallback 到全局 trigger_rebuild()。
+        bridge_uid = state.client_uid_map.get(id(ws), "")
+        scope_label = "未知"
+        if bridge_uid and trigger_rebuild_for_uid(bridge_uid):
+            scope_label = f"单账号定向重建 (uid={bridge_uid})"
+        else:
+            try:
+                trigger_rebuild()
+            except Exception as e:
+                logger.warning(f"调用 trigger_rebuild() 失败: {e}")
+            scope_label = (
+                f"全局重建 (uid 缺失/无对应 manager；bridge_uid={bridge_uid or '空'})"
+            )
+
         logger.error(
             f"🔥 节点 {node_label(ws)} 因 {reason} 累计冷却第 {count} 次（阈值 {threshold}），"
-            f"判定为坏号 → 主动断开该节点并触发全局重建。"
+            f"判定为坏号 → 主动断开该节点并触发{scope_label}。"
         )
-        # 主动断开该 WS：finally 段会清理 active_clients / cooldown / 计数器
+        # 主动断开该 WS：finally 段会清理 active_clients / cooldown / 计数器 / uid_map
         try:
             asyncio.create_task(ws.close(code=1000))
         except Exception:
             pass
-        # 触发全局重建（由 manager 在下一轮循环中处理）。同一周期内多次调用会被去重。
-        try:
-            trigger_rebuild()
-        except Exception as e:
-            logger.warning(f"调用 trigger_rebuild() 失败: {e}")
     else:
         logger.warning(
             f"⛔ 节点 {node_label(ws)} 因 {reason} 进入冷却 {seconds}s "

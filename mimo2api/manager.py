@@ -35,6 +35,32 @@ def trigger_rebuild():
     """供外部调用，触发所有账号强制重建"""
     rebuild_event.set()
 
+
+# uid -> AccountManager 的注册表（在 _spawn_account_task 中维护）。
+# 用于支持 trigger_rebuild_for_uid() 做「单账号定向重建」，
+# 这是 401 累计冷却阈值后的精准升级路径，避免一只坏号拖死其他健康账号。
+_account_managers: dict[str, "AccountManager"] = {}
+
+
+def trigger_rebuild_for_uid(uid: str) -> bool:
+    """触发单个账号定向重建（不影响其他账号）。
+
+    返回 True 表示找到对应 AccountManager 且已 set 其 per-account event；
+    返回 False 表示找不到（uid 拼写错误 / 账号已被禁用 / 老版 bridge 没传 uid 等），
+    调用方应自行决定是否 fallback 到全局 ``trigger_rebuild()``。
+    """
+    if not uid:
+        return False
+    mgr = _account_managers.get(str(uid))
+    if mgr is None:
+        return False
+    try:
+        mgr.signal_rebuild()
+    except Exception as e:  # 极端情况下 event loop 已关闭等
+        logger.warning(f"trigger_rebuild_for_uid({uid}) 失败: {e}")
+        return False
+    return True
+
 # 配置日志格式
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - [%(name)s] - %(levelname)s - %(message)s")
 logger = logging.getLogger("Manager")
@@ -359,8 +385,14 @@ def load_all_users() -> dict:
     return users
 
 
-async def get_bridge_code() -> str:
-    """读取本地 bridge 代码文本"""
+async def get_bridge_code(uid: str = "") -> str:
+    """读取本地 bridge 代码文本，并按账号注入 WS_URL / 鉴权 token / 归属 uid。
+
+    Args:
+        uid: 该 bridge 归属的账号 userId。会被网关 ws_tunnel 记入 ``client_uid_map``，
+             用于后续 401 累计冷却升级时做「单账号定向重建」。
+             留空则下发的 bridge 不带 uid，等价于老版本行为，会 fallback 到全局重建。
+    """
     import re
     bridge_path = os.path.join(os.path.dirname(__file__), "bridge.py")
     def _read():
@@ -384,6 +416,10 @@ async def get_bridge_code() -> str:
     # ensure_ascii=False：避免 emoji / 非 BMP 字符被编成 surrogate pair 而失真。
     bridge_token = os.environ.get("MIMO_WS_BRIDGE_TOKEN", "")
     code = code.replace('"__BRIDGE_TOKEN__"', json.dumps(bridge_token, ensure_ascii=False))
+
+    # 注入归属 uid（用于服务端 client_uid_map 标记 → 单账号定向重建）。
+    # 同样以 json.dumps 整体替换 "__BRIDGE_UID__" 字面量，避免特殊字符破坏代码语法。
+    code = code.replace('"__BRIDGE_UID__"', json.dumps(str(uid or ""), ensure_ascii=False))
     return code
 
 
@@ -634,6 +670,38 @@ class AccountManager:
         self.is_first_round = True
         # 连续失败计数器（创建失败 或 连接失败），达到阈值自动禁用
         self._consecutive_failures = 0
+        # 单账号定向重建 event。被 trigger_rebuild_for_uid() 设置时，
+        # 该账号正在挂起的 _interruptible_sleep_dual 会立刻唤醒并进入下一轮销毁重建，
+        # 而其他账号（包括正在睡眠的）完全不受影响。
+        # 注意：asyncio.Event 必须在 event loop 内创建，AccountManager 实例
+        # 是在 _spawn_account_task 内创建的，那时已经有运行中的 loop，安全。
+        self._rebuild_event: asyncio.Event = asyncio.Event()
+
+    def signal_rebuild(self) -> None:
+        """对外暴露的"请求该账号立即重建"接口（trigger_rebuild_for_uid 内部调用）。"""
+        self._rebuild_event.set()
+
+    async def _interruptible_sleep_dual(self, seconds: int) -> None:
+        """同时被全局 rebuild_event 与本账号 _rebuild_event 唤醒的 sleep。
+
+        - 任一 event 被 set → 立即返回（caller 在循环末尾自行判断哪一个并 clear）
+        - 两个都没 set 且超时 → 自然返回，进入下一轮重建周期
+        """
+        waiters = [
+            asyncio.create_task(rebuild_event.wait()),
+            asyncio.create_task(self._rebuild_event.wait()),
+        ]
+        try:
+            await asyncio.wait_for(
+                asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED),
+                timeout=seconds,
+            )
+        except asyncio.TimeoutError:
+            pass
+        finally:
+            for w in waiters:
+                if not w.done():
+                    w.cancel()
 
     async def get_instance_status(self) -> tuple[str, int]:
         """获取当前容器的状态和剩余时间(秒)"""
@@ -685,7 +753,7 @@ class AccountManager:
                     if await self.connect_with_retry(client, max_retries=3, delay=5, create=False):
                         # 成功连接 → 重置失败计数
                         self._consecutive_failures = 0
-                        bridge_code = await get_bridge_code()
+                        bridge_code = await get_bridge_code(self.uid)
                         inject_prompt = (
                             "好，请检查当前环境是否有 websockets 和 httpx 依赖（如果没有请马上安装）。\n"
                             "然后，请先将当前主机上正在运行（如果有的话）的所有资源桥接脚本进程杀掉（例如寻找并 kill 掉包含 ws:// 连结的后台 python 进程），"
@@ -703,9 +771,12 @@ class AccountManager:
                             wait_time = max(60, wait_time - self.stagger_offset)
                             self.is_first_round = False
                         self.logger.info(f"容器直接复用成功！等待休眠 {wait_time} 秒直至其快过期时再触发完整的强制重建...")
-                        await interruptible_sleep(wait_time)
-                        if rebuild_event.is_set():
-                            self.logger.info("🔔 收到手动重建信号，立即销毁重建！")
+                        await self._interruptible_sleep_dual(wait_time)
+                        if self._rebuild_event.is_set():
+                            self.logger.info(f"🔔 [{self.uid}] 收到本账号定向重建信号，立即销毁重建！")
+                            self._rebuild_event.clear()
+                        elif rebuild_event.is_set():
+                            self.logger.info("🔔 收到全局重建信号，立即销毁重建！")
                             rebuild_event.clear()
                         continue
                     else:
@@ -765,7 +836,7 @@ class AccountManager:
 
                 # 5. 注入核心桥接通信脚本
                 self.logger.info("正解析并注入 mimo2api bridge.py ...")
-                bridge_code = await get_bridge_code()
+                bridge_code = await get_bridge_code(self.uid)
                 inject_prompt = (
                     "好，帮我安装websockets和httpx。\n"
                     "然后请用 nohup 后台静默运行以下 Python 资源桥接代码（请务必在后台运行，不要阻塞我们的对话！）：\n"
@@ -787,9 +858,12 @@ class AccountManager:
                 
                 # 关闭本地 ws，释放本地请求负荷，让内网 bridge 持续长留工作
                 await client.close()
-                await interruptible_sleep(wait_time)
-                if rebuild_event.is_set():
-                    self.logger.info("🔔 收到手动重建信号，立即销毁重建！")
+                await self._interruptible_sleep_dual(wait_time)
+                if self._rebuild_event.is_set():
+                    self.logger.info(f"🔔 [{self.uid}] 收到本账号定向重建信号，立即销毁重建！")
+                    self._rebuild_event.clear()
+                elif rebuild_event.is_set():
+                    self.logger.info("🔔 收到全局重建信号，立即销毁重建！")
                     rebuild_event.clear()
 
             except asyncio.CancelledError:
@@ -809,11 +883,18 @@ _HOTRELOAD_INTERVAL = 10  # 每 10 秒扫描一次 users/ 目录
 def _spawn_account_task(uid: str, user_info: dict, stagger_offset: int = 0, init_delay: float = 0):
     """为单个账号创建并注册后台生命周期任务"""
     manager = AccountManager(uid, user_info, stagger_offset=stagger_offset)
+    # 注册到 uid -> manager 表，使 trigger_rebuild_for_uid() 能精准 set 其 _rebuild_event
+    _account_managers[str(uid)] = manager
 
     async def _run():
         if init_delay > 0:
             await asyncio.sleep(init_delay)
-        await manager.run_lifecycle()
+        try:
+            await manager.run_lifecycle()
+        finally:
+            # 任务自然退出（被禁用 / 取消等）→ 同步从注册表移除，避免 trigger_rebuild_for_uid
+            # 把信号 set 到一个永远不会再 wait 的 event 上造成静默丢失。
+            _account_managers.pop(str(uid), None)
 
     task = asyncio.create_task(_run())
     _account_tasks[uid] = task
@@ -868,6 +949,7 @@ async def start_manager_tasks():
             removed_uids = managed_uids - current_uids
             for uid in removed_uids:
                 task = _account_tasks.pop(uid, None)
+                _account_managers.pop(str(uid), None)
                 if task and not task.done():
                     logger.info(f"🗑️ 热加载: 账号 {uid} 已删除，正在取消其生命周期任务...")
                     task.cancel()
@@ -876,6 +958,7 @@ async def start_manager_tasks():
             for uid in list(_account_tasks.keys()):
                 if uid in disabled:
                     task = _account_tasks.pop(uid, None)
+                    _account_managers.pop(str(uid), None)
                     if task and not task.done():
                         logger.info(f"🚫 热加载: 账号 {uid} 已被禁用，正在停止其生命周期任务...")
                         task.cancel()
@@ -884,6 +967,7 @@ async def start_manager_tasks():
             for uid in list(_account_tasks.keys()):
                 if _account_tasks[uid].done():
                     _account_tasks.pop(uid, None)
+                    _account_managers.pop(str(uid), None)
 
         except asyncio.CancelledError:
             break

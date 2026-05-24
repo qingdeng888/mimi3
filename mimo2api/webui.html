@@ -412,6 +412,7 @@
                         <tr>
                             <th>#</th>
                             <th>节点地址</th>
+                            <th>归属账号</th>
                             <th>在线时长</th>
                             <th>状态</th>
                             <th style="text-align:right;">处理中请求</th>
@@ -419,7 +420,7 @@
                         </tr>
                     </thead>
                     <tbody id="clientsBody">
-                        <tr><td colspan="6" class="empty-state">加载中...</td></tr>
+                        <tr><td colspan="7" class="empty-state">加载中...</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -1228,7 +1229,7 @@
                 const data = await res.json();
                 const tbody = document.getElementById('clientsBody');
                 if (!data.clients || data.clients.length === 0) {
-                    tbody.innerHTML = '<tr><td colspan="6" class="empty-state">当前没有任何内网节点保持连接</td></tr>';
+                    tbody.innerHTML = '<tr><td colspan="7" class="empty-state">当前没有任何内网节点保持连接</td></tr>';
                     return;
                 }
                 tbody.innerHTML = data.clients.map(c => {
@@ -1244,9 +1245,13 @@
                         ? '<span class="badge" style="font-size:10px; margin-left:6px; background:rgba(79,70,229,0.15); border-color:rgba(79,70,229,0.3);" title="下一个 round-robin 命中节点">本轮命中</span>'
                         : '';
                     const pendingColor = c.pending_requests > 0 ? 'color:var(--primary);font-weight:600;' : 'color:var(--text-muted);';
+                    const uidCell = c.uid
+                        ? `<code style="font-family:monospace; font-size:12px; color:#1e1b4b;" title="bridge.py 通过 ?uid=... 上报，cooldown 升级时按此账号定向重建">${escapeHtml(c.uid)}</code>`
+                        : '<span class="badge warn" style="font-size:11px;" title="老版 bridge 未携带 uid，cooldown 升级时会 fallback 到全局重建">未上报</span>';
                     return `<tr>
                         <td style="color:var(--text-muted); font-variant-numeric:tabular-nums;">${c.index + 1}</td>
                         <td><code style="font-family:monospace; font-size:13px;">${escapeHtml(c.address)}</code>${currentMark}</td>
+                        <td>${uidCell}</td>
                         <td style="font-size:13px;">${formatDuration(c.duration_seconds)}</td>
                         <td>${statusBadge}</td>
                         <td style="text-align:right; ${pendingColor} font-variant-numeric:tabular-nums;">${c.pending_requests}</td>

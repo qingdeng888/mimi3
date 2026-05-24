@@ -142,7 +142,7 @@ python main.py
 | `MIMO_WEBUI_COOKIE_SECURE` | 否 | `false` | 仅在 HTTPS 反代时建议设为 `true`。 |
 | `MIMO_WEBUI_COOKIE_NAME` | 否 | `mimo_webui_session` | Cookie 名。 |
 | `MIMO_NODE_401_COOLDOWN_SECONDS` | 否 | `30` | 节点返回 401 时的冷却时长（秒）。 |
-| `MIMO_NODE_COOLDOWN_REBUILD_THRESHOLD` | 否 | `3` | 同一节点累计冷却该次数后判定为坏号，自动断开并触发**全局重建**（销毁并重建所有账号的 Claw 容器）。设为 `0` 关闭该升级策略。 |
+| `MIMO_NODE_COOLDOWN_REBUILD_THRESHOLD` | 否 | `3` | 同一节点累计冷却该次数后判定为坏号，自动断开并优先做**单账号定向重建**（仅销毁/重建该坏号 uid 对应的 Claw 容器，不影响其他健康账号）。仅当 bridge 没有上报 uid（老版本）或对应账号已不存在时，才 fallback 到全局重建。设为 `0` 关闭该升级策略。 |
 | `MIMO_PROCESS_LOCK_PATH` | 否 | `项目目录/mimo2api.lock` | 单进程锁文件路径，避免重复启动同一份网关。 |
 | `MIMO_PROXY_URL` | 否 | 空 | 代理地址，**仅用于 Claw 创建/销毁/状态查询**请求（不影响客户端 API 转发）。支持 HTTP / HTTPS / SOCKS5。格式：`http://ip:port`、`socks5://user:pass@ip:port`。留空 = 不走代理。 |
 | `MIMO_XIEQU_API_URL` | 否 | 空 | 携趣 IP 短效代理 API 提取地址（可选，**优先级高于 `MIMO_PROXY_URL`**）。配置后，每次"创建/销毁 mimo-claw"前都会实时拉一条 HTTP 短效代理（≈30 秒）使用，用完即丢，避免拼用静态代理被风控。也可以在 WebUI 的「携趣 IP 短效代理」卡片里填入并热加载。 |
@@ -768,7 +768,9 @@ docker run -d --name mimi3 \
 
 - **运行日志**：控制台 + `logs/gateway.log`（10 MB × 5 轮转）。
 - **错误环形缓冲**：最近的 4xx/5xx 见 `/api/errors` 或 WebUI「错误日志」。
-- **节点冷却**：上游返回 401 的节点会冷却 `MIMO_NODE_401_COOLDOWN_SECONDS`（默认 30 秒），避免反复打到坏号；同一节点累计冷却到 `MIMO_NODE_COOLDOWN_REBUILD_THRESHOLD`（默认 3）次后会被判定为坏号，自动断开 WS 并调用 `trigger_rebuild()`，由 Manager 在下一轮循环销毁并重建所有 Claw 容器。
+- **节点冷却**：上游返回 401 的节点会冷却 `MIMO_NODE_401_COOLDOWN_SECONDS`（默认 30 秒），避免反复打到坏号；同一节点累计冷却到 `MIMO_NODE_COOLDOWN_REBUILD_THRESHOLD`（默认 3）次后会被判定为坏号，自动断开 WS。重建范围按下面优先级决定：
+  1. **单账号定向重建**：bridge.py 通过 `?uid=...` 上报了归属账号 → 网关只对那个账号触发 `_rebuild_event` → Manager 只重建那一个 Claw 容器，其他账号继续运行不受影响。
+  2. **全局重建**（兜底）：bridge.py 没带 uid（老版本）或对应账号已被删除/禁用时，自动调用 `trigger_rebuild()` 让所有账号在下一轮循环销毁重建。
 - **悬挂队列扫描**：每 60 秒巡检一次，超过 5 分钟无活动的请求队列会被强制回收，防止内存泄漏。
 - **流式 keepalive**：每 25 秒发一条 `: keep-alive` SSE 注释行；超过 60 秒上游无数据视为节点断开。
 
