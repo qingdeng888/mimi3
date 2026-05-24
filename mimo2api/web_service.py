@@ -210,7 +210,10 @@ STREAM_CHUNK_TIMEOUT = 60
 STREAM_KEEPALIVE_INTERVAL = 25  # 秒，需小于 Cloudflare 超时 (~100s)
 QUEUE_DRAIN_TIMEOUT = 5
 DEFAULT_GATEWAY_ERROR = "Gateway Error: 所有节点请求失败"
-NODE_401_COOLDOWN_SECONDS = int(os.getenv("MIMO_NODE_401_COOLDOWN_SECONDS", "900"))
+NODE_401_COOLDOWN_SECONDS = int(os.getenv("MIMO_NODE_401_COOLDOWN_SECONDS", "30"))
+# 同一节点累计冷却达到该阈值时，判定为坏号并自动调用 trigger_rebuild() 触发全局重建；
+# 设为 0 表示关闭该自动重建特性（仅冷却，不再升级到重建）。
+NODE_COOLDOWN_REBUILD_THRESHOLD = int(os.getenv("MIMO_NODE_COOLDOWN_REBUILD_THRESHOLD", "3"))
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PROCESS_LOCK_PATH = os.getenv("MIMO_PROCESS_LOCK_PATH", os.path.join(ROOT_DIR, "mimo2api.lock"))
 
@@ -395,6 +398,7 @@ async def ws_tunnel(ws: WebSocket):
     await ws.accept()
     state.active_clients.append(ws)
     state.client_cooldowns.pop(id(ws), None)
+    state.client_cooldown_counts.pop(id(ws), None)
     state.client_connected_at[id(ws)] = time.time()
     logger.info(f"✅ 内网节点已接入: {client_addr}。当前在线节点数: {len(state.active_clients)}")
     
@@ -414,6 +418,7 @@ async def ws_tunnel(ws: WebSocket):
         if ws in state.active_clients:
             state.active_clients.remove(ws)
         state.client_cooldowns.pop(id(ws), None)
+        state.client_cooldown_counts.pop(id(ws), None)
         state.client_connected_at.pop(id(ws), None)
         
         # 清理该节点的所有孤儿队列
@@ -487,10 +492,33 @@ def cleanup_pending_request(req_id: str) -> None:
 def cooldown_client(ws: WebSocket, seconds: int, reason: str) -> None:
     cooldown_until = time.time() + max(seconds, 0)
     state.client_cooldowns[id(ws)] = cooldown_until
-    logger.warning(
-        f"⛔ 节点 {node_label(ws)} 因 {reason} 进入冷却 {seconds}s，"
-        f"冷却结束时间戳: {int(cooldown_until)}"
-    )
+
+    # 累计第几次进入冷却（重连/断开时会被清零）
+    count = state.client_cooldown_counts.get(id(ws), 0) + 1
+    state.client_cooldown_counts[id(ws)] = count
+
+    threshold = NODE_COOLDOWN_REBUILD_THRESHOLD
+    if threshold > 0 and count >= threshold:
+        logger.error(
+            f"🔥 节点 {node_label(ws)} 因 {reason} 累计冷却第 {count} 次（阈值 {threshold}），"
+            f"判定为坏号 → 主动断开该节点并触发全局重建。"
+        )
+        # 主动断开该 WS：finally 段会清理 active_clients / cooldown / 计数器
+        try:
+            asyncio.create_task(ws.close(code=1000))
+        except Exception:
+            pass
+        # 触发全局重建（由 manager 在下一轮循环中处理）。同一周期内多次调用会被去重。
+        try:
+            trigger_rebuild()
+        except Exception as e:
+            logger.warning(f"调用 trigger_rebuild() 失败: {e}")
+    else:
+        logger.warning(
+            f"⛔ 节点 {node_label(ws)} 因 {reason} 进入冷却 {seconds}s "
+            f"(累计第 {count}{'/' + str(threshold) if threshold > 0 else ''} 次)，"
+            f"冷却结束时间戳: {int(cooldown_until)}"
+        )
 
 async def drain_and_close(req_id: str, queue: asyncio.Queue) -> None:
     try:
