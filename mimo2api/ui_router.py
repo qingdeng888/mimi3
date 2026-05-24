@@ -696,6 +696,8 @@ async def api_clients_list():
       - ``host`` / ``port``: 节点的源 IP 与端口
       - ``connected_at``: Unix 时间戳；``duration_seconds`` 已运行秒数
       - ``in_cooldown`` / ``cooldown_remaining_seconds``: 冷却状态（如 401 触发的临时跳过）
+      - ``cooldown_count``: 该节点累计进入冷却的次数（重连后清零；
+        达到 ``MIMO_NODE_COOLDOWN_REBUILD_THRESHOLD`` 会自动触发全局重建）
       - ``pending_requests``: 当前正由该节点处理中的请求队列数
       - ``current``: 是否是下一次 round-robin 命中的节点（仅作展示）
     """
@@ -709,6 +711,7 @@ async def api_clients_list():
         connected_at = state.client_connected_at.get(ws_id, 0)
         cooldown_until = state.client_cooldowns.get(ws_id, 0)
         in_cooldown = cooldown_until > now
+        cooldown_count = state.client_cooldown_counts.get(ws_id, 0)
         host = ws.client.host if ws.client else "Unknown"
         port = ws.client.port if ws.client else 0
         items.append({
@@ -722,6 +725,7 @@ async def api_clients_list():
             "in_cooldown": in_cooldown,
             "cooldown_until": int(cooldown_until) if in_cooldown else None,
             "cooldown_remaining_seconds": max(0, int(cooldown_until - now)) if in_cooldown else 0,
+            "cooldown_count": cooldown_count,
             "pending_requests": len(state.ws_to_req_ids.get(ws_id, set())),
             "current": index == state.current_client_index,
         })

@@ -1232,9 +1232,14 @@
                     return;
                 }
                 tbody.innerHTML = data.clients.map(c => {
+                    const cooldownTooltip = c.in_cooldown
+                        ? `冷却剩余 ${c.cooldown_remaining_seconds} 秒（累计冷却 ${c.cooldown_count} 次，达阈值会触发自动重建）`
+                        : (c.cooldown_count > 0 ? `已累计冷却 ${c.cooldown_count} 次（重连后清零）` : '在线');
                     const statusBadge = c.in_cooldown
-                        ? `<span class="badge warn" style="font-size:11px;" title="冷却剩余 ${c.cooldown_remaining_seconds} 秒">冷却中 (${c.cooldown_remaining_seconds}s)</span>`
-                        : '<span class="badge" style="font-size:11px; background:rgba(16,185,129,0.15); color:#047857; border-color:rgba(16,185,129,0.3);">在线</span>';
+                        ? `<span class="badge warn" style="font-size:11px;" title="${cooldownTooltip}">冷却中 (${c.cooldown_remaining_seconds}s · 第${c.cooldown_count}次)</span>`
+                        : (c.cooldown_count > 0
+                            ? `<span class="badge" style="font-size:11px; background:rgba(245,158,11,0.12); color:#b45309; border-color:rgba(245,158,11,0.25);" title="${cooldownTooltip}">在线 (累计冷却 ${c.cooldown_count} 次)</span>`
+                            : '<span class="badge" style="font-size:11px; background:rgba(16,185,129,0.15); color:#047857; border-color:rgba(16,185,129,0.3);">在线</span>');
                     const currentMark = c.current
                         ? '<span class="badge" style="font-size:10px; margin-left:6px; background:rgba(79,70,229,0.15); border-color:rgba(79,70,229,0.3);" title="下一个 round-robin 命中节点">本轮命中</span>'
                         : '';
