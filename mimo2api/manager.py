@@ -923,9 +923,17 @@ def _spawn_account_task(uid: str, user_info: dict, stagger_offset: int = 0, init
         try:
             await manager.run_lifecycle()
         finally:
-            # 任务自然退出（被禁用 / 取消等）→ 同步从注册表移除，避免 trigger_rebuild_for_uid
-            # 把信号 set 到一个永远不会再 wait 的 event 上造成静默丢失。
-            _account_managers.pop(str(uid), None)
+            # ⚠️ 必须用「指纹比对」而不是无脑 pop：仅当注册表里那个 manager 还指向"我自己"时才移除。
+            #
+            # 反例（不比对的 race）：
+            #   1. 禁用 A → 热加载 cancel(旧 task) + pop _account_managers[A]
+            #   2. 旧 task 收到 CancelledError，但 finally 还在 await 链中没跑完
+            #   3. 启用 A → 下一轮热加载 spawn 新 task，新 manager 注册到 _account_managers[A]
+            #   4. 旧 task 的 finally 终于跑到 → 无脑 pop 把刚注册的新 manager 误删
+            #   5. 之后 trigger_rebuild_for_uid(A) 永远找不到 manager → 静默 fallback 全局重建
+            #      （单账号定向重建功能从此失效，需要重启进程才能恢复）
+            if _account_managers.get(str(uid)) is manager:
+                _account_managers.pop(str(uid), None)
 
     task = asyncio.create_task(_run())
     _account_tasks[uid] = task

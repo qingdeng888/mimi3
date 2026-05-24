@@ -267,10 +267,19 @@ async def api_users_recreate(uid: str):
                 if st:
                     last_status = st
                 if st == "AVAILABLE":
-                    # 创建成功后触发全局重建信号让 Manager 感知并注入 bridge
-                    from .manager import trigger_rebuild
-                    trigger_rebuild()
-                    return JSONResponse({"status": "ok", "claw_status": "AVAILABLE", "message": "环境创建成功，已触发桥接注入"})
+                    # 创建成功后触发桥接注入：优先按 uid 做单账号定向重建，避免无差别打扰其他健康账号。
+                    # 仅当对应 manager 找不到（账号被禁用 / 任务已退出 / 罕见 race）时才 fallback 到全局。
+                    from .manager import trigger_rebuild, trigger_rebuild_for_uid
+                    if trigger_rebuild_for_uid(uid):
+                        scope_msg = "已触发该账号定向重建（仅本账号）"
+                    else:
+                        trigger_rebuild()
+                        scope_msg = "未找到对应 manager，已 fallback 触发全局重建"
+                    return JSONResponse({
+                        "status": "ok",
+                        "claw_status": "AVAILABLE",
+                        "message": f"环境创建成功，{scope_msg}",
+                    })
                 if st in ("FAILED", "CREATE_FAILED", "ERROR"):
                     return JSONResponse({"detail": f"创建失败，状态: {st}"}, status_code=502)
             except Exception:

@@ -401,20 +401,33 @@ async def ws_tunnel(ws: WebSocket):
     # 老版本 bridge 不带此参数时为空字符串，cooldown 升级路径会自动 fallback 全局重建。
     bridge_uid = ws.query_params.get("uid", "").strip()
 
-    # 同 uid 去重：每个账号在网关侧最多只允许保留一条 /ws 连接。
+    # ⚠️ 关键顺序：必须先把自己注册进 active_clients + client_uid_map，再扫描去重。
+    # 否则两条同 uid 新连接 A、B 几乎同时进入本协程时，A 完成 accept 但还没 append，
+    # B 也完成 accept 时扫描到的同 uid 集合里只有"老的 X"而看不到 A → 双方都只驱逐 X，
+    # 各自 append 自己 → 最终 active_clients 残留 A 和 B 两条同 uid 的节点（这正是上一版 fix 的失效场景）。
+    # 先注册自己后扫描"除自己外"的同 uid，并发场景下 A 的去重会驱逐 B 之前已注册的项（反之亦然），
+    # 最终只剩最后进来的那条。
+    state.active_clients.append(ws)
+    state.client_cooldowns.pop(id(ws), None)
+    state.client_cooldown_counts.pop(id(ws), None)
+    if bridge_uid:
+        state.client_uid_map[id(ws)] = bridge_uid
+    state.client_connected_at[id(ws)] = time.time()
+
+    # 同 uid 去重：扫描"除自己外"的同 uid 旧连接，全部驱逐。
     # 业务背景：
     #   - 路径 B 的"反向重启"通常无法清理容器内 nohup 后台 bridge.py，导致老 bridge 与新 bridge
     #     在同一容器并存，从 WebUI 看到同一账号有 2+ 节点在线（且老连接已经是僵尸）。
     #   - 即便上游 kill 干净，旧 bridge 的 TCP RST 也可能比新 bridge 的连接更晚到。
-    # 策略：新连接进来时，主动驱逐 client_uid_map 里已记录的同 uid 旧 ws —— 新 bridge 永远是更可信的那个
-    # （它刚拿到的 ticket / token 最新；老 bridge 此时通常已经处于无法工作的状态）。
-    # 老 ws 被 close(1012) 后，其 ws_tunnel 协程的 finally 段会自然回收 active_clients / cooldown / uid_map /
-    # 孤儿请求队列等所有状态，无需在此重复清理（避免与 finally 抢占造成状态不一致）。
+    # 策略：保留最新连接，驱逐其他同 uid（新 bridge 持有最新 ticket/token，更可信）。
+    # 老 ws 被 close(1012) 后，其 ws_tunnel 协程的 finally 段会自然回收 active_clients / cooldown /
+    # uid_map / 孤儿请求队列等所有状态，无需在此重复清理（避免与 finally 抢占造成状态不一致）。
     if bridge_uid:
-        # 复制一份同 uid 的旧 ws 列表后再操作，避免在迭代中修改 client_uid_map
+        my_id = id(ws)
+        # 复制一份同 uid 的旧 ws 列表后再操作（注意排除自己）
         stale_ws_list = [
             old_ws for old_ws in list(state.active_clients)
-            if state.client_uid_map.get(id(old_ws)) == bridge_uid
+            if id(old_ws) != my_id and state.client_uid_map.get(id(old_ws)) == bridge_uid
         ]
         for old_ws in stale_ws_list:
             old_addr = f"{old_ws.client.host}:{old_ws.client.port}" if old_ws.client else "Unknown"
@@ -428,13 +441,6 @@ async def ws_tunnel(ws: WebSocket):
             except Exception as e:
                 # close 失败不是致命错误：旧 ws 的 receive_text 也会因 socket 状态变化而抛错并进入 finally。
                 logger.warning(f"驱逐旧 ws (uid={bridge_uid}) 时 close 抛异常: {e}（finally 仍会回收）")
-
-    state.active_clients.append(ws)
-    state.client_cooldowns.pop(id(ws), None)
-    state.client_cooldown_counts.pop(id(ws), None)
-    if bridge_uid:
-        state.client_uid_map[id(ws)] = bridge_uid
-    state.client_connected_at[id(ws)] = time.time()
     uid_label = f" (uid={bridge_uid})" if bridge_uid else " (uid=未上报/老版bridge)"
     logger.info(f"✅ 内网节点已接入: {client_addr}{uid_label}。当前在线节点数: {len(state.active_clients)}")
     
