@@ -695,6 +695,8 @@ async def api_clients_list():
       - ``id``: 字符串形式的 ``id(ws)``，用于断开 API 定位 WS 对象。
       - ``uid``: 该连接归属的账号 userId（bridge.py 通过 ?uid=... 上报；
         老版本 bridge 没带此字段则为空字符串）。
+      - ``name``: 该 uid 在 ``users/user_<uid>.json`` 中持久化的备注名（WebUI 可点击编辑）。
+        无备注名 / uid 缺失时为空字符串，由前端决定显示占位。
       - ``host`` / ``port``: 节点的源 IP 与端口
       - ``connected_at``: Unix 时间戳；``duration_seconds`` 已运行秒数
       - ``in_cooldown`` / ``cooldown_remaining_seconds``: 冷却状态（如 401 触发的临时跳过）
@@ -707,6 +709,28 @@ async def api_clients_list():
     import time as _time
 
     now = _time.time()
+
+    # 一次性扫描 users/ 目录构建 uid -> 备注名映射，供下面所有节点公用，避免每条节点都做一次 IO。
+    # 失败一律静默退化为空 dict，保证 /api/clients 的可用性永远高于"展示是否好看"。
+    uid_to_name: dict[str, str] = {}
+    try:
+        if os.path.isdir(USERS_DIR):
+            for fn in os.listdir(USERS_DIR):
+                if fn.startswith("user_") and fn.endswith(".json"):
+                    fp = os.path.join(USERS_DIR, fn)
+                    try:
+                        with open(fp, "r", encoding="utf-8") as f:
+                            udata = json.load(f) or {}
+                        u = str(udata.get("userId", "")).strip()
+                        n = str(udata.get("name", "") or "").strip()
+                        if u:
+                            uid_to_name[u] = n
+                    except Exception:
+                        # 损坏的单个 user_*.json 不影响其他账号显示
+                        continue
+    except Exception:
+        pass
+
     items: list[dict] = []
     # 注意：state.active_clients 列表索引会随删除变化，不能依赖；用 id(ws) 当稳定 key
     for index, ws in enumerate(state.active_clients):
@@ -716,11 +740,13 @@ async def api_clients_list():
         in_cooldown = cooldown_until > now
         cooldown_count = state.client_cooldown_counts.get(ws_id, 0)
         bridge_uid = state.client_uid_map.get(ws_id, "")
+        bridge_name = uid_to_name.get(bridge_uid, "") if bridge_uid else ""
         host = ws.client.host if ws.client else "Unknown"
         port = ws.client.port if ws.client else 0
         items.append({
             "id": str(ws_id),
             "uid": bridge_uid,
+            "name": bridge_name,
             "index": index,
             "host": host,
             "port": port,

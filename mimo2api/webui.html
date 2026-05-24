@@ -1245,9 +1245,25 @@
                         ? '<span class="badge" style="font-size:10px; margin-left:6px; background:rgba(79,70,229,0.15); border-color:rgba(79,70,229,0.3);" title="下一个 round-robin 命中节点">本轮命中</span>'
                         : '';
                     const pendingColor = c.pending_requests > 0 ? 'color:var(--primary);font-weight:600;' : 'color:var(--text-muted);';
-                    const uidCell = c.uid
-                        ? `<code style="font-family:monospace; font-size:12px; color:#1e1b4b;" title="bridge.py 通过 ?uid=... 上报，cooldown 升级时按此账号定向重建">${escapeHtml(c.uid)}</code>`
-                        : '<span class="badge warn" style="font-size:11px;" title="老版 bridge 未携带 uid，cooldown 升级时会 fallback 到全局重建">未上报</span>';
+                    // 「归属账号」单元格：优先显示 user_<uid>.json 里的备注名（粗体），
+                    // userId 作为次行的灰色小字，便于运维同时看到友好名 + 真实 ID。
+                    // 老版 bridge 没上报 uid 时仍显示警告徽章，cooldown 升级会 fallback 到全局重建。
+                    let uidCell;
+                    if (c.uid) {
+                        const friendly = (c.name || '').trim();
+                        const tooltip = friendly
+                            ? `账号备注名: ${friendly}（来自 user_${c.uid}.json 的 name 字段，可在上方账号列表点击编辑）`
+                            : '该 uid 在 users/ 目录下没有备注名（user_*.json 的 name 字段为空），点击上方账号列表可补充';
+                        const nameLine = friendly
+                            ? `<strong style="color:var(--primary); font-size:13px;">${escapeHtml(friendly)}</strong>`
+                            : `<span style="color:var(--text-muted); font-size:12px; font-style:italic;">未命名</span>`;
+                        uidCell = `<div title="${escapeHtml(tooltip)}" style="line-height:1.35;">
+                            ${nameLine}
+                            <div style="font-family:monospace; font-size:11px; color:var(--text-muted); margin-top:2px;">${escapeHtml(c.uid)}</div>
+                        </div>`;
+                    } else {
+                        uidCell = '<span class="badge warn" style="font-size:11px;" title="老版 bridge 未携带 uid，cooldown 升级时会 fallback 到全局重建">未上报</span>';
+                    }
                     return `<tr>
                         <td style="color:var(--text-muted); font-variant-numeric:tabular-nums;">${c.index + 1}</td>
                         <td><code style="font-family:monospace; font-size:13px;">${escapeHtml(c.address)}</code>${currentMark}</td>

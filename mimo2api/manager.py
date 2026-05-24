@@ -727,8 +727,16 @@ class AccountManager:
             if await client.connect(wait_available=create):
                 self.logger.info("已成功通过 websocket 建联!")
                 return True
-            self.logger.warning(f"由于网络或 API 限制连结无响应，{delay}秒后重试...")
-            await asyncio.sleep(delay)
+            # 重试间隙的 sleep 必须能被「单账号定向重建」/「全局重建」信号打断，
+            # 否则一只坏号最坏要等 max_retries * delay（默认 80s）才能进入下一轮重建，
+            # 与 cooldown 升级"立即重建"的语义严重不符。
+            self.logger.warning(f"由于网络或 API 限制连结无响应，{delay}秒后重试（可被重建信号打断）...")
+            await self._interruptible_sleep_dual(delay)
+            # 被信号唤醒 → 尽快脱身，让上层 run_lifecycle 进入 destroy+create 重建流程。
+            # 这里不 clear event：让上层那个守候的 `_rebuild_event.is_set()` 检查能正确感知。
+            if self._rebuild_event.is_set() or rebuild_event.is_set():
+                self.logger.info("🔔 connect_with_retry 期间收到重建信号，立即放弃重连返回上层。")
+                return False
         self.logger.error("连接 Claw 超过最大重试次数")
         return False
 
@@ -806,7 +814,15 @@ class AccountManager:
                         except Exception:
                             pass
                         return
-                    await asyncio.sleep(60)
+                    # 连续失败但还没达到自动禁用阈值 → 等 60 秒再重试一轮；
+                    # 这段 sleep 必须能被重建信号打断，否则坏号会被吞 60s 才响应单账号定向重建。
+                    await self._interruptible_sleep_dual(60)
+                    if self._rebuild_event.is_set():
+                        self.logger.info(f"🔔 [{self.uid}] 失败回退期间收到本账号重建信号，立即开启下一轮。")
+                        self._rebuild_event.clear()
+                    elif rebuild_event.is_set():
+                        self.logger.info("🔔 失败回退期间收到全局重建信号，立即开启下一轮。")
+                        rebuild_event.clear()
                     continue
 
                 # 成功创建并连接 → 重置失败计数
@@ -881,7 +897,14 @@ class AccountManager:
             except Exception as e:
                 self.logger.error(f"严重异常，生命周期阻断: {e}", exc_info=True)
                 await client.close()
-                await asyncio.sleep(60)
+                # 兜底 sleep 也必须监听重建信号：账号刚抛异常时往往是最该被立刻重建的时刻。
+                await self._interruptible_sleep_dual(60)
+                if self._rebuild_event.is_set():
+                    self.logger.info(f"🔔 [{self.uid}] 异常回退期间收到本账号重建信号，立即开启下一轮。")
+                    self._rebuild_event.clear()
+                elif rebuild_event.is_set():
+                    self.logger.info("🔔 异常回退期间收到全局重建信号，立即开启下一轮。")
+                    rebuild_event.clear()
 
 # 全局任务注册表：uid -> asyncio.Task，供热加载使用
 _account_tasks: dict[str, asyncio.Task] = {}
