@@ -463,7 +463,29 @@ async def api_users_disable(uid: str):
     except Exception:
         pass
 
-    return JSONResponse({"status": "ok", "message": f"账号 {uid} 已禁用，Claw 实例已触发销毁"})
+    # 主动从 gateway 侧关闭该 uid 对应的所有 WebSocket 连接。
+    # 禁用流程原先只依赖「容器销毁 → bridge 进程被杀 → TCP 断开 → gateway 回收」这条间接路径。
+    # 但如果 Claw 销毁 API 失败 / 延迟 / bridge 因 nohup 残留等原因未被立即杀掉，
+    # gateway 的 active_clients 里仍会保留该节点 → WebUI 节点面板显示"在线"（与禁用状态矛盾）。
+    # 这里补一刀：主动 close(1001) 该 uid 的所有 ws，确保节点面板立即反映禁用状态。
+    # ws.close() 后对应 ws_tunnel 的 finally 分支会自然回收所有关联状态（cooldown / uid_map 等）。
+    evicted_count = 0
+    stale_ws_list = [
+        ws for ws in list(state.active_clients)
+        if state.client_uid_map.get(id(ws)) == uid
+    ]
+    for ws in stale_ws_list:
+        try:
+            await ws.close(code=1001)  # 1001 = Going Away
+            evicted_count += 1
+        except Exception:
+            pass  # close 失败无妨，finally 仍会回收
+
+    return JSONResponse({
+        "status": "ok",
+        "message": f"账号 {uid} 已禁用，Claw 实例已触发销毁",
+        "evicted_ws_nodes": evicted_count,
+    })
 
 
 @router.post("/api/users/enable/{uid}")
