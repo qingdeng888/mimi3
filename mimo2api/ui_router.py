@@ -79,6 +79,17 @@ def _invalidate_user_alias_cache() -> None:
     _user_alias_cache_loaded_at = 0.0
 
 
+def _revoke_sessions_for_uid(uid: str) -> int:
+    """撤销 gateway 中该 uid 对应的所有会话注册码，使 bridge 无法再通过 session 验证重连。
+
+    返回被撤销的 session 数量。
+    """
+    to_remove = [token for token, token_uid in list(state.valid_sessions.items()) if token_uid == uid]
+    for token in to_remove:
+        state.valid_sessions.pop(token, None)
+    return len(to_remove)
+
+
 # ----------------- 后台 close 任务集合（fire-and-forget） -----------------
 # 网关侧主动关闭 ws 的场景（disconnect API、cooldown 升级踢除等）不应该让 await close
 # 把请求 worker 卡死——半死 ws 的关闭帧可能要走完 TCP 重传定时器才能返回。
@@ -403,11 +414,24 @@ async def api_users_rename(uid: str, request: Request):
 @router.delete("/api/users/delete/{uid}")
 async def api_users_delete(uid: str):
     target_file = os.path.join(USERS_DIR, f"user_{uid}.json")
-    if os.path.exists(target_file):
-        os.remove(target_file)
-        _invalidate_user_alias_cache()
-        return JSONResponse({"status": "ok"})
-    return JSONResponse({"detail": "User not found"}, status_code=404)
+    if not os.path.exists(target_file):
+        return JSONResponse({"detail": "User not found"}, status_code=404)
+
+    os.remove(target_file)
+    _invalidate_user_alias_cache()
+
+    # 撤销该 uid 的所有会话注册码 → bridge 无法再重连
+    revoked = _revoke_sessions_for_uid(uid)
+
+    # 主动踢除该 uid 当前在线的 ws 连接
+    for ws in list(state.active_clients):
+        if state.client_uid_map.get(id(ws)) == uid:
+            try:
+                await ws.close(code=4001)
+            except Exception:
+                pass
+
+    return JSONResponse({"status": "ok", "revoked_sessions": revoked})
 
 
 @router.post("/api/users/disable/{uid}")
@@ -470,6 +494,10 @@ async def api_users_disable(uid: str):
     # 这里补一刀：主动 close(4001) 该 uid 的所有 ws，确保节点面板立即反映禁用状态。
     # 4001 是自定义 close code，bridge 收到后会停止重连循环（而非 3s 后再连回来）。
     # ws.close() 后对应 ws_tunnel 的 finally 分支会自然回收所有关联状态（cooldown / uid_map 等）。
+
+    # 先撤销该 uid 的所有会话注册码 → 即使 close 失败，bridge 重连也会被 gateway 拒绝
+    revoked = _revoke_sessions_for_uid(uid)
+
     evicted_count = 0
     stale_ws_list = [
         ws for ws in list(state.active_clients)
@@ -486,6 +514,7 @@ async def api_users_disable(uid: str):
         "status": "ok",
         "message": f"账号 {uid} 已禁用，Claw 实例已触发销毁",
         "evicted_ws_nodes": evicted_count,
+        "revoked_sessions": revoked,
     })
 
 

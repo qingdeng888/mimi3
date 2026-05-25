@@ -28,14 +28,26 @@ BRIDGE_TOKEN = "__BRIDGE_TOKEN__"
 #    其他位置不能再以带引号形式写出该字面量，避免 manager.py 全局 str.replace 误伤注释。
 BRIDGE_UID = "__BRIDGE_UID__"
 
+# 会话注册码占位符；manager.py 会用 json.dumps(session_token) 整体替换下面 BRIDGE_SESSION 赋值那一行
+# 带双引号的字面量。
+# 每次创建/重建实例时 manager 生成一个唯一 session_token 并注册到 gateway 的 valid_sessions 表，
+# bridge 连接 /ws 时通过 ?session=... 提交，gateway 验证后才 accept。
+# 禁用/删除账号时 session 从 valid_sessions 中撤销 → bridge 无论如何重连都被拒绝。
+#
+# ⚠️ 同样限定：整个文件只能在「下面 BRIDGE_SESSION 赋值那一行」出现这一处带双引号的占位符，
+#    其他位置不能再以带引号形式写出该字面量，避免 manager.py 全局 str.replace 误伤注释。
+BRIDGE_SESSION = "__BRIDGE_SESSION__"
+
 
 def _build_ws_url() -> str:
-    """把 token / uid 以 query 参数的形式拼到 WS_URL 上；为空则跳过对应字段。"""
+    """把 token / uid / session 以 query 参数的形式拼到 WS_URL 上；为空则跳过对应字段。"""
     qs: list[str] = []
     if BRIDGE_TOKEN:
         qs.append(f"token={urllib.parse.quote(BRIDGE_TOKEN, safe='')}")
     if BRIDGE_UID:
         qs.append(f"uid={urllib.parse.quote(BRIDGE_UID, safe='')}")
+    if BRIDGE_SESSION:
+        qs.append(f"session={urllib.parse.quote(BRIDGE_SESSION, safe='')}")
     if not qs:
         return WS_URL
     sep = "&" if "?" in WS_URL else "?"

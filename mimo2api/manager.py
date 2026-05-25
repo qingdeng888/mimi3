@@ -411,7 +411,7 @@ def load_all_users() -> dict:
 
 
 async def get_bridge_code(uid: str = "") -> str:
-    """读取本地 bridge 代码文本，并按账号注入 WS_URL / 鉴权 token / 归属 uid。
+    """读取本地 bridge 代码文本，并按账号注入 WS_URL / 鉴权 token / 归属 uid / 会话注册码。
 
     Args:
         uid: 该 bridge 归属的账号 userId。会被网关 ws_tunnel 记入 ``client_uid_map``，
@@ -419,6 +419,7 @@ async def get_bridge_code(uid: str = "") -> str:
              留空则下发的 bridge 不带 uid，等价于老版本行为，会 fallback 到全局重建。
     """
     import re
+    import secrets as _secrets
     bridge_path = os.path.join(os.path.dirname(__file__), "bridge.py")
     def _read():
         with open(bridge_path, "r", encoding="utf-8") as f:
@@ -445,6 +446,21 @@ async def get_bridge_code(uid: str = "") -> str:
     # 注入归属 uid（用于服务端 client_uid_map 标记 → 单账号定向重建）。
     # 同样以 json.dumps 整体替换 "__BRIDGE_UID__" 字面量，避免特殊字符破坏代码语法。
     code = code.replace('"__BRIDGE_UID__"', json.dumps(str(uid or ""), ensure_ascii=False))
+
+    # 生成并注入会话注册码（session_token）。
+    # 每次调用 get_bridge_code 都会生成新的 session → 旧 bridge 的 session 自动失效（被新注册覆盖 uid 无关，
+    # 因为多 session 可以同时存在于 valid_sessions 中，禁用时按 uid 批量撤销即可）。
+    # session 注册到 gateway_state.valid_sessions 后，bridge 连接时必须携带才能通过验证。
+    session_token = _secrets.token_urlsafe(16)
+    from .gateway_state import state as _gw_state
+    # 先撤销该 uid 的旧 session（一个 uid 同一时间只应有一个有效 session，
+    # 重建意味着旧 bridge 应当失效），再注册新的。
+    if uid:
+        old_tokens = [t for t, u in list(_gw_state.valid_sessions.items()) if u == str(uid)]
+        for t in old_tokens:
+            _gw_state.valid_sessions.pop(t, None)
+    _gw_state.valid_sessions[session_token] = str(uid or "")
+    code = code.replace('"__BRIDGE_SESSION__"', json.dumps(session_token, ensure_ascii=False))
     return code
 
 

@@ -35,6 +35,14 @@ class GatewayState:
         # 节点首次接入时以 connected_at 作为初始值（视作隐式首次心跳），
         # 避免刚连上但还没来得及发第一个心跳就被误判超时。
         self.client_last_heartbeat: Dict[int, float] = {}
+        # 会话注册码：session_token → uid。
+        # manager.py 在每次创建/重建 bridge 时生成一个唯一 session_token 并注册到此表，
+        # bridge 连接 /ws 时必须通过 ?session=<token> 提交，gateway 验证后才 accept。
+        # 禁用/删除账号时从此表移除对应 uid 的所有 session → bridge 重连时被拒绝。
+        # 续期/正常运行期间 session 保持不变，bridge 断线重连仍可用同一 session。
+        self.valid_sessions: Dict[str, str] = {}
+        # ws 连接使用的 session_token：id(ws) -> session_token，用于断开时回收映射
+        self.client_session_map: Dict[int, str] = {}
         self.metrics_started_at: float = time.time()
         self.metrics_history_last_snapshot: Dict[str, Any] | None = None
         self.metrics: Dict[str, Any] = self._default_metrics()

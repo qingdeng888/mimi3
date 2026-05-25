@@ -448,9 +448,20 @@ async def ws_tunnel(ws: WebSocket):
     # 老版本 bridge 不带此参数时为空字符串，cooldown 升级路径会自动 fallback 全局重建。
     bridge_uid = ws.query_params.get("uid", "").strip()
 
-    # 若该账号已被禁用，直接拒绝连接并用 4001 告知 bridge 停止重连。
-    # 这是防止 bridge 在「禁用 close(4001) 之后、容器销毁之前」的时间窗口内重连成功的双保险。
-    if bridge_uid:
+    # 会话注册码验证：bridge 必须携带 ?session=<token>，该 token 由 manager 在创建/重建时生成并注册。
+    # 禁用/删除账号时 session 被撤销 → bridge 无论如何重连都无法通过验证。
+    # 老版本 bridge 不带 session 参数时跳过此检查（向后兼容），但仍受 is_account_disabled 保护。
+    bridge_session = ws.query_params.get("session", "").strip()
+    if bridge_session:
+        if bridge_session not in state.valid_sessions:
+            logger.warning(f"🚫 拒绝无效/已撤销 session 的 /ws 连接: {client_addr} (session={bridge_session[:8]}...)")
+            try:
+                await ws.close(code=4001)  # 4001 = 会话无效，bridge 收到后停止重连
+            except Exception:
+                pass
+            return
+    elif bridge_uid:
+        # 老版本 bridge 不带 session → fallback 到禁用检查
         from .manager import is_account_disabled
         if is_account_disabled(bridge_uid):
             logger.warning(f"🚫 拒绝已禁用账号 {bridge_uid} 的 /ws 重连: {client_addr}")
@@ -471,6 +482,8 @@ async def ws_tunnel(ws: WebSocket):
     state.client_cooldown_counts.pop(id(ws), None)
     if bridge_uid:
         state.client_uid_map[id(ws)] = bridge_uid
+    if bridge_session:
+        state.client_session_map[id(ws)] = bridge_session
     state.client_connected_at[id(ws)] = time.time()
     state.client_last_heartbeat[id(ws)] = time.time()  # 初始心跳 = 接入时刻，避免刚连上就被 TTL 误判
 
@@ -528,6 +541,7 @@ async def ws_tunnel(ws: WebSocket):
         state.client_uid_map.pop(id(ws), None)
         state.client_connected_at.pop(id(ws), None)
         state.client_last_heartbeat.pop(id(ws), None)
+        state.client_session_map.pop(id(ws), None)
         
         # 清理该节点的所有孤儿队列
         orphan_ids = state.ws_to_req_ids.pop(id(ws), set())
