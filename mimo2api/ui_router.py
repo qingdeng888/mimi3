@@ -467,7 +467,8 @@ async def api_users_disable(uid: str):
     # 禁用流程原先只依赖「容器销毁 → bridge 进程被杀 → TCP 断开 → gateway 回收」这条间接路径。
     # 但如果 Claw 销毁 API 失败 / 延迟 / bridge 因 nohup 残留等原因未被立即杀掉，
     # gateway 的 active_clients 里仍会保留该节点 → WebUI 节点面板显示"在线"（与禁用状态矛盾）。
-    # 这里补一刀：主动 close(1001) 该 uid 的所有 ws，确保节点面板立即反映禁用状态。
+    # 这里补一刀：主动 close(4001) 该 uid 的所有 ws，确保节点面板立即反映禁用状态。
+    # 4001 是自定义 close code，bridge 收到后会停止重连循环（而非 3s 后再连回来）。
     # ws.close() 后对应 ws_tunnel 的 finally 分支会自然回收所有关联状态（cooldown / uid_map 等）。
     evicted_count = 0
     stale_ws_list = [
@@ -476,7 +477,7 @@ async def api_users_disable(uid: str):
     ]
     for ws in stale_ws_list:
         try:
-            await ws.close(code=1001)  # 1001 = Going Away
+            await ws.close(code=4001)  # 4001 = 账号已禁用，bridge 收到后停止重连
             evicted_count += 1
         except Exception:
             pass  # close 失败无妨，finally 仍会回收

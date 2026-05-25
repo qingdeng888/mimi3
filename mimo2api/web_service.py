@@ -448,6 +448,18 @@ async def ws_tunnel(ws: WebSocket):
     # 老版本 bridge 不带此参数时为空字符串，cooldown 升级路径会自动 fallback 全局重建。
     bridge_uid = ws.query_params.get("uid", "").strip()
 
+    # 若该账号已被禁用，直接拒绝连接并用 4001 告知 bridge 停止重连。
+    # 这是防止 bridge 在「禁用 close(4001) 之后、容器销毁之前」的时间窗口内重连成功的双保险。
+    if bridge_uid:
+        from .manager import is_account_disabled
+        if is_account_disabled(bridge_uid):
+            logger.warning(f"🚫 拒绝已禁用账号 {bridge_uid} 的 /ws 重连: {client_addr}")
+            try:
+                await ws.close(code=4001)
+            except Exception:
+                pass
+            return
+
     # ⚠️ 关键顺序：必须先把自己注册进 active_clients + client_uid_map，再扫描去重。
     # 否则两条同 uid 新连接 A、B 几乎同时进入本协程时，A 完成 accept 但还没 append，
     # B 也完成 accept 时扫描到的同 uid 集合里只有"老的 X"而看不到 A → 双方都只驱逐 X，

@@ -91,6 +91,15 @@ async def main():
                             asyncio.create_task(handle_request(ws, json.loads(msg), client, send_lock))
                     finally:
                         hb_task.cancel()
+            except websockets.exceptions.ConnectionClosedError as e:
+                # 4001 = 账号已禁用，gateway 明确告知不要重连
+                if e.code == 4001:
+                    break
+                await asyncio.sleep(3)
+            except websockets.exceptions.ConnectionClosed as e:
+                if e.code == 4001:
+                    break
+                await asyncio.sleep(3)
             except Exception:
                 await asyncio.sleep(3)
 
