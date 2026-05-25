@@ -859,7 +859,7 @@ async def api_clients_list():
     每条返回：
       - ``id``: 字符串形式的 ``id(ws)``，用于断开 API 定位 WS 对象。
       - ``uid``: 该连接归属的账号 userId（bridge.py 通过 ?uid=... 上报；
-        老版本 bridge 没带此字段则为空字符串）。
+        未上报时为空字符串）。
       - ``name``: 该 uid 在 ``users/user_<uid>.json`` 中持久化的备注名（WebUI 可点击编辑）。
         无备注名 / uid 缺失时为空字符串，由前端决定显示占位。
       - ``host`` / ``port``: 节点的源 IP 与端口
@@ -923,7 +923,7 @@ async def api_clients_disconnect(client_id: str):
     ``client_id`` 是 ``GET /api/clients`` 中返回的 ``id`` 字段（即 ``id(ws)`` 的字符串形式）。
     断开后 ``ws_tunnel`` 的 finally 分支会自然回收 ``active_clients`` / 冷却状态 /
     孤儿请求队列；该节点对应的 Claw 容器内 bridge.py 通常会在 3s 后自动重连
-    （若网关已启用 MIMO_WS_BRIDGE_TOKEN 鉴权，重连仍需带正确 token）。
+    （重连时仍需携带有效 session_token 才能通过验证）。
     """
     try:
         target_ws_id = int(client_id)

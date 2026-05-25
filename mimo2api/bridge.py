@@ -4,19 +4,6 @@ KEY = os.getenv("MIMO_API_KEY")
 URL = os.getenv("MIMO_API_ENDPOINT")
 BASE = URL.split("/v1/")[0] if "/v1/" in URL else URL
 WS_URL = "__WS_URL__"
-# 桥接共享密钥占位符；manager.py 会用 json.dumps(token) 整体替换下面 BRIDGE_TOKEN 赋值那一行
-# 带双引号的字面量。
-# - 网关未配置 MIMO_WS_BRIDGE_TOKEN → 替换为空串 ""，下面 `if not BRIDGE_TOKEN` 为真 → 按未鉴权直连。
-# - 网关配置了 MIMO_WS_BRIDGE_TOKEN  → 替换为 token 明文，自动以 ?token=... 形式拼接到 WS_URL。
-#
-# ⚠️ 安全 / 正确性双重约束：整个文件只能在「下面 BRIDGE_TOKEN 赋值那一行」出现这一处带双引号的占位符，
-#    其他位置（包括本注释段）绝对不能再以带引号形式写出占位符字面量。
-#    因为 manager.py 用的是全局 str.replace，多处出现会被同时替换：
-#      1. 控制流被破坏（历史上的"BRIDGE_TOKEN 与占位符自身比较"兜底分支就是因此自我矛盾，
-#         导致下发的 bridge 永远不带 token、被服务端 1008 拒绝、节点上不了线）；
-#      2. 真实 token 会被注入到注释里，随 bridge 源码一同作为 prompt 投递到 Claw 容器内的 LLM，
-#         泄漏到对话上下文与平台日志（这是真实发生过的安全事故）。
-BRIDGE_TOKEN = "__BRIDGE_TOKEN__"
 
 # 桥接归属账号 uid 占位符；manager.py 会用 json.dumps(uid) 整体替换下面 BRIDGE_UID 赋值那一行
 # 带双引号的字面量。
@@ -40,10 +27,8 @@ BRIDGE_SESSION = "__BRIDGE_SESSION__"
 
 
 def _build_ws_url() -> str:
-    """把 token / uid / session 以 query 参数的形式拼到 WS_URL 上；为空则跳过对应字段。"""
+    """把 uid / session 以 query 参数的形式拼到 WS_URL 上；为空则跳过对应字段。"""
     qs: list[str] = []
-    if BRIDGE_TOKEN:
-        qs.append(f"token={urllib.parse.quote(BRIDGE_TOKEN, safe='')}")
     if BRIDGE_UID:
         qs.append(f"uid={urllib.parse.quote(BRIDGE_UID, safe='')}")
     if BRIDGE_SESSION:

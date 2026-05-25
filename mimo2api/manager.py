@@ -416,7 +416,6 @@ async def get_bridge_code(uid: str = "") -> str:
     Args:
         uid: 该 bridge 归属的账号 userId。会被网关 ws_tunnel 记入 ``client_uid_map``，
              用于后续 401 累计冷却升级时做「单账号定向重建」。
-             留空则下发的 bridge 不带 uid，等价于老版本行为，会 fallback 到全局重建。
     """
     import re
     import secrets as _secrets
@@ -432,16 +431,6 @@ async def get_bridge_code(uid: str = "") -> str:
         raise ValueError("MIMO2API_WS_URL环境变量未配置")
     # 动态把桥接脚本里面原来写死的 WS_URL 给替换掉，并返回修改后的代码块。
     code = code.replace("__WS_URL__", ws_url)
-
-    # 同步把 /ws 桥接共享密钥（可选）模板进 bridge.py。留空则下发的 bridge 不带 token，
-    # 与服务端「未启用鉴权」语义对齐；服务端若已开启鉴权则会拒绝旧 bridge 重连，
-    # Manager 下一次重建周期会自然把携带 token 的新 bridge 注入进去。
-    #
-    # 用 json.dumps(token) 替换整段 `"__BRIDGE_TOKEN__"`（含引号），
-    # 这样 token 即便包含双引号 / 反斜杠 / 控制字符也会被正确转义成合法 Python 字面量。
-    # ensure_ascii=False：避免 emoji / 非 BMP 字符被编成 surrogate pair 而失真。
-    bridge_token = os.environ.get("MIMO_WS_BRIDGE_TOKEN", "")
-    code = code.replace('"__BRIDGE_TOKEN__"', json.dumps(bridge_token, ensure_ascii=False))
 
     # 注入归属 uid（用于服务端 client_uid_map 标记 → 单账号定向重建）。
     # 同样以 json.dumps 整体替换 "__BRIDGE_UID__" 字面量，避免特殊字符破坏代码语法。

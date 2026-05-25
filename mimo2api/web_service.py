@@ -1,7 +1,6 @@
 import asyncio
 import base64
 import binascii
-import hmac
 import json
 import logging
 import time
@@ -126,7 +125,7 @@ async def sweep_heartbeat_timeout():
                 ws_id = id(ws)
                 last_hb = state.client_last_heartbeat.get(ws_id)
                 if last_hb is None:
-                    # 老版本 bridge 不发心跳 → 不踢（向后兼容），但用 connected_at 作为兜底
+                    # 以 connected_at 作为兜底初始值
                     last_hb = state.client_connected_at.get(ws_id, now)
                 if now - last_hb > HEARTBEAT_TIMEOUT:
                     uid = state.client_uid_map.get(ws_id, "未知")
@@ -264,13 +263,7 @@ NODE_COOLDOWN_REBUILD_THRESHOLD = int(os.getenv("MIMO_NODE_COOLDOWN_REBUILD_THRE
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PROCESS_LOCK_PATH = os.getenv("MIMO_PROCESS_LOCK_PATH", os.path.join(ROOT_DIR, "mimo2api.lock"))
 
-# /ws 桥接共享密钥：设置后 Claw 节点必须通过 ?token=xxx 或 X-Bridge-Token 头才能连入。
-# 留空 = 关闭鉴权（向后兼容）。建议在公网/反代部署时务必设置一个长随机串。
-WS_BRIDGE_TOKEN = os.getenv("MIMO_WS_BRIDGE_TOKEN", "").strip()
-if WS_BRIDGE_TOKEN:
-    logger.info("🔐 /ws 桥接鉴权已启用 (MIMO_WS_BRIDGE_TOKEN)")
-else:
-    logger.warning("⚠️ /ws 桥接未启用鉴权，建议在公网部署时设置 MIMO_WS_BRIDGE_TOKEN")
+
 
 # 后台 fire-and-forget 任务集合
 _background_tasks: set[asyncio.Task] = set()
@@ -430,46 +423,21 @@ async def api_delete_model_mapping(model_name: str):
 async def ws_tunnel(ws: WebSocket):
     client_addr = f"{ws.client.host}:{ws.client.port}" if ws.client else "Unknown"
 
-    # 鉴权：当配置了 MIMO_WS_BRIDGE_TOKEN 时，要求 query 中带 ?token= 或 header X-Bridge-Token
-    # 不通过 → 在 accept 前直接关闭，避免被扫描器/未授权方占用 active_clients 池。
-    if WS_BRIDGE_TOKEN:
-        provided = ws.query_params.get("token") or ws.headers.get("x-bridge-token", "")
-        if not provided or not hmac.compare_digest(provided.encode(), WS_BRIDGE_TOKEN.encode()):
-            logger.warning(f"🚫 拒绝未鉴权的 /ws 连接: {client_addr}")
-            try:
-                await ws.close(code=1008)  # Policy Violation
-            except Exception:
-                pass
-            return
-
     await ws.accept()
 
     # bridge.py 通过 ?uid=<account_userId> 上报本连接归属哪个账号。
-    # 老版本 bridge 不带此参数时为空字符串，cooldown 升级路径会自动 fallback 全局重建。
     bridge_uid = ws.query_params.get("uid", "").strip()
 
     # 会话注册码验证：bridge 必须携带 ?session=<token>，该 token 由 manager 在创建/重建时生成并注册。
     # 禁用/删除账号时 session 被撤销 → bridge 无论如何重连都无法通过验证。
-    # 老版本 bridge 不带 session 参数时跳过此检查（向后兼容），但仍受 is_account_disabled 保护。
     bridge_session = ws.query_params.get("session", "").strip()
-    if bridge_session:
-        if bridge_session not in state.valid_sessions:
-            logger.warning(f"🚫 拒绝无效/已撤销 session 的 /ws 连接: {client_addr} (session={bridge_session[:8]}...)")
-            try:
-                await ws.close(code=4001)  # 4001 = 会话无效，bridge 收到后停止重连
-            except Exception:
-                pass
-            return
-    elif bridge_uid:
-        # 老版本 bridge 不带 session → fallback 到禁用检查
-        from .manager import is_account_disabled
-        if is_account_disabled(bridge_uid):
-            logger.warning(f"🚫 拒绝已禁用账号 {bridge_uid} 的 /ws 重连: {client_addr}")
-            try:
-                await ws.close(code=4001)
-            except Exception:
-                pass
-            return
+    if not bridge_session or bridge_session not in state.valid_sessions:
+        logger.warning(f"🚫 拒绝无效/已撤销/缺失 session 的 /ws 连接: {client_addr} (session={bridge_session[:8] + '...' if bridge_session else '空'})")
+        try:
+            await ws.close(code=4001)  # 4001 = 会话无效，bridge 收到后停止重连
+        except Exception:
+            pass
+        return
 
     # ⚠️ 关键顺序：必须先把自己注册进 active_clients + client_uid_map，再扫描去重。
     # 否则两条同 uid 新连接 A、B 几乎同时进入本协程时，A 完成 accept 但还没 append，
@@ -514,7 +482,7 @@ async def ws_tunnel(ws: WebSocket):
             except Exception as e:
                 # close 失败不是致命错误：旧 ws 的 receive_text 也会因 socket 状态变化而抛错并进入 finally。
                 logger.warning(f"驱逐旧 ws (uid={bridge_uid}) 时 close 抛异常: {e}（finally 仍会回收）")
-    uid_label = f" (uid={bridge_uid})" if bridge_uid else " (uid=未上报/老版bridge)"
+    uid_label = f" (uid={bridge_uid})" if bridge_uid else " (uid=未上报)"
     logger.info(f"✅ 内网节点已接入: {client_addr}{uid_label}。当前在线节点数: {len(state.active_clients)}")
     
     try:
@@ -622,7 +590,7 @@ def cooldown_client(ws: WebSocket, seconds: int, reason: str) -> None:
     threshold = NODE_COOLDOWN_REBUILD_THRESHOLD
     if threshold > 0 and count >= threshold:
         # 优先按 uid 做单账号定向重建（节省其他健康账号），
-        # 只有在拿不到 uid（老版 bridge 不带 ?uid=）或对应 AccountManager 已不存在时
+        # 只有在拿不到 uid 或对应 AccountManager 已不存在时
         # 才 fallback 到全局 trigger_rebuild()。
         bridge_uid = state.client_uid_map.get(id(ws), "")
         scope_label = "未知"

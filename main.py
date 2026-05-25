@@ -48,8 +48,4 @@ if __name__ == "__main__":
 
     logging.info(f"🚀 mimo2api 统一主入口 - 正在启动网关并绑定集群到 {SERVER_HOST}:{SERVER_PORT}")
     logging.info(f"🔗 云端要求 Claw 主动连接的桥接 WS URL 将统一下发为: {WS_TUNNEL_URL}")
-    if os.getenv("MIMO_WS_BRIDGE_TOKEN", "").strip():
-        logging.info("🔐 /ws 桥接共享密钥已配置 (MIMO_WS_BRIDGE_TOKEN)，未授权连接将被直接拒绝")
-    else:
-        logging.warning("⚠️ /ws 桥接未启用共享密钥，建议在公网部署时设置 MIMO_WS_BRIDGE_TOKEN 防止被扫描")
     uvicorn.run(app, host=SERVER_HOST, port=SERVER_PORT, ws_max_size=10**8)

@@ -404,7 +404,7 @@
             <div style="font-size:12px; color:var(--text-muted); margin-top:8px;">
                 列出当前所有保持长连接到 <code>/ws</code> 的内网桥接节点。可对单个节点执行
                 <strong>主动断开</strong>。被断开后，对应 Claw 容器内的 bridge 进程通常会在数秒内自动重连
-                （若启用了 <code>MIMO_WS_BRIDGE_TOKEN</code>，重连仍受密钥校验保护）。
+                （重连时仍需携带有效 session_token 才能通过验证）。
             </div>
             <div class="table-wrapper" style="margin-top:14px;">
                 <table>
@@ -1282,7 +1282,7 @@
         }
 
         async function disconnectClient(id, address) {
-            if (!confirm(`确定要主动断开节点 ${address} 的 WebSocket 连接吗？\n\n断开后该节点上正在处理中的请求会被标记为失败，但其 Claw 容器内的 bridge 通常会在数秒内自动重连。\n如启用了 MIMO_WS_BRIDGE_TOKEN，重连仍受密钥校验保护。`)) return;
+            if (!confirm(`确定要主动断开节点 ${address} 的 WebSocket 连接吗？\n\n断开后该节点上正在处理中的请求会被标记为失败，但其 Claw 容器内的 bridge 通常会在数秒内自动重连（重连时仍需携带有效 session_token）。`)) return;
             try {
                 const res = await apiFetch('/api/clients/' + encodeURIComponent(id) + '/disconnect', {method: 'POST'});
                 const data = await res.json();

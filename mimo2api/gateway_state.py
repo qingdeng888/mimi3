@@ -24,8 +24,7 @@ class GatewayState:
         # 节点归属账号：id(ws) -> uid 字符串。
         # bridge.py 在连接 /ws 时通过 ?uid=... 上报；ws_tunnel 接收后写入此表。
         # 用于 cooldown_client 升级时调用 trigger_rebuild_for_uid(uid) 做单账号定向重建，
-        # 而不是一只坏号触发全局重建拖死所有账号。老版本 bridge 不带 uid 时此表为空，
-        # 升级路径会自动 fallback 到 trigger_rebuild() 全局重建（向后兼容）。
+        # 而不是一只坏号触发全局重建拖死所有账号。
         self.client_uid_map: Dict[int, str] = {}
         # 节点接入时间戳：id(ws) -> 接入 Unix 时间戳，用于 WebUI 展示在线时长
         self.client_connected_at: Dict[int, float] = {}
