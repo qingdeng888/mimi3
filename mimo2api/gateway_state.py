@@ -29,6 +29,12 @@ class GatewayState:
         self.client_uid_map: Dict[int, str] = {}
         # 节点接入时间戳：id(ws) -> 接入 Unix 时间戳，用于 WebUI 展示在线时长
         self.client_connected_at: Dict[int, float] = {}
+        # 节点最近心跳时间戳：id(ws) -> 最近一次收到心跳的 Unix 时间戳。
+        # bridge.py 每 10s 发送 {"type": "heartbeat"}，gateway 收到后更新此表。
+        # 后台 TTL 扫描协程定期检查：超过阈值未收到心跳的节点视为僵尸，主动踢除。
+        # 节点首次接入时以 connected_at 作为初始值（视作隐式首次心跳），
+        # 避免刚连上但还没来得及发第一个心跳就被误判超时。
+        self.client_last_heartbeat: Dict[int, float] = {}
         self.metrics_started_at: float = time.time()
         self.metrics_history_last_snapshot: Dict[str, Any] | None = None
         self.metrics: Dict[str, Any] = self._default_metrics()

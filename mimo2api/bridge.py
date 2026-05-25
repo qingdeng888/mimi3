@@ -69,6 +69,15 @@ async def handle_request(ws, req, client, lock):
     except Exception as e:
         await safe_send(ws, lock, {"req_id": req_id, "type": "error", "body": str(e)})
 
+async def heartbeat_loop(ws, lock, interval=10):
+    """每 interval 秒向 gateway 发送心跳，让 gateway 知道本 bridge 仍然存活。"""
+    try:
+        while True:
+            await asyncio.sleep(interval)
+            await safe_send(ws, lock, {"type": "heartbeat"})
+    except Exception:
+        pass  # ws 关闭时自然退出
+
 async def main():
     ws_url = _build_ws_url()
     async with httpx.AsyncClient(timeout=None) as client:
@@ -76,8 +85,12 @@ async def main():
             try:
                 async with websockets.connect(ws_url, max_size=10**8) as ws:
                     send_lock = asyncio.Lock()
-                    async for msg in ws:
-                        asyncio.create_task(handle_request(ws, json.loads(msg), client, send_lock))
+                    hb_task = asyncio.create_task(heartbeat_loop(ws, send_lock))
+                    try:
+                        async for msg in ws:
+                            asyncio.create_task(handle_request(ws, json.loads(msg), client, send_lock))
+                    finally:
+                        hb_task.cancel()
             except Exception:
                 await asyncio.sleep(3)
 

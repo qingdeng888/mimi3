@@ -73,8 +73,14 @@ logger = logging.getLogger(__name__)
 manager_bg_task = None
 metrics_persist_task = None
 sweeper_bg_task = None
+heartbeat_sweeper_task = None
 single_process_lock_file = None
 STALE_QUEUE_TTL = 300
+# 心跳超时阈值（秒）：bridge 每 10s 发心跳，超过 35s 没收到 → 视为僵尸节点。
+# 留出 3.5 倍心跳间隔的容忍度，避免偶尔网络抖动导致误杀。
+HEARTBEAT_TIMEOUT = int(os.getenv("MIMO_HEARTBEAT_TIMEOUT", "35"))
+# 心跳扫描间隔（秒）：后台协程每隔多久检查一次所有节点的心跳
+HEARTBEAT_SCAN_INTERVAL = 15
 
 def sweep_stale_queues_once(now: float | None = None) -> int:
     now = time.time() if now is None else now
@@ -99,9 +105,48 @@ async def sweep_stale_queues():
         except Exception as e:
             logger.error(f"清理死锁队列任务发生异常: {e}")
 
+
+async def sweep_heartbeat_timeout():
+    """后台巡检任务：定期扫描所有在线节点的心跳时间戳，超时未心跳的视为僵尸并踢除。
+
+    设计意图：
+      - bridge.py 每 10s 发送 {"type": "heartbeat"}，gateway 在 ws_tunnel 中更新 client_last_heartbeat。
+      - 本协程每 HEARTBEAT_SCAN_INTERVAL 秒扫描一次，发现超过 HEARTBEAT_TIMEOUT 未心跳的节点后
+        主动 close(1001)，触发 ws_tunnel 的 finally 分支自动回收所有关联状态。
+      - 这是禁用时主动 close + 容器销毁间接断开之外的**最后一道兜底防线**：
+        即使前两者都失败（Claw API 超时 / bridge nohup 残留 / TCP 半关闭），
+        心跳超时后仍然会在 HEARTBEAT_TIMEOUT 内把僵尸节点从 active_clients 中清除。
+    """
+    while True:
+        try:
+            await asyncio.sleep(HEARTBEAT_SCAN_INTERVAL)
+            now = time.time()
+            # 复制一份避免迭代中修改
+            for ws in list(state.active_clients):
+                ws_id = id(ws)
+                last_hb = state.client_last_heartbeat.get(ws_id)
+                if last_hb is None:
+                    # 老版本 bridge 不发心跳 → 不踢（向后兼容），但用 connected_at 作为兜底
+                    last_hb = state.client_connected_at.get(ws_id, now)
+                if now - last_hb > HEARTBEAT_TIMEOUT:
+                    uid = state.client_uid_map.get(ws_id, "未知")
+                    addr = f"{ws.client.host}:{ws.client.port}" if ws.client else "Unknown"
+                    logger.warning(
+                        f"💀 节点 {addr} (uid={uid}) 心跳超时 "
+                        f"({int(now - last_hb)}s > {HEARTBEAT_TIMEOUT}s)，判定为僵尸，主动踢除。"
+                    )
+                    try:
+                        await ws.close(code=1001)  # Going Away
+                    except Exception:
+                        pass  # close 失败不致命，ws_tunnel finally 仍会回收
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"心跳超时巡检任务发生异常: {e}")
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global manager_bg_task, metrics_persist_task, sweeper_bg_task
+    global manager_bg_task, metrics_persist_task, sweeper_bg_task, heartbeat_sweeper_task
     logger.info("🚀 正在拉起挂后台的 Claw 账号守护线程...")
     acquire_single_process_lock()
 
@@ -113,10 +158,12 @@ async def lifespan(app: FastAPI):
     manager_bg_task = asyncio.create_task(start_manager_tasks())
     metrics_persist_task = asyncio.create_task(metrics_history_worker())
     sweeper_bg_task = asyncio.create_task(sweep_stale_queues()) # 启动巡检死神
+    heartbeat_sweeper_task = asyncio.create_task(sweep_heartbeat_timeout())  # 心跳 TTL 兜底
+    logger.info(f"💓 心跳超时巡检已启动（超时阈值={HEARTBEAT_TIMEOUT}s，扫描间隔={HEARTBEAT_SCAN_INTERVAL}s）")
     
     yield
     
-    for task in [manager_bg_task, metrics_persist_task, sweeper_bg_task]:
+    for task in [manager_bg_task, metrics_persist_task, sweeper_bg_task, heartbeat_sweeper_task]:
         if task:
             task.cancel()
     if metrics_persist_task:
@@ -413,6 +460,7 @@ async def ws_tunnel(ws: WebSocket):
     if bridge_uid:
         state.client_uid_map[id(ws)] = bridge_uid
     state.client_connected_at[id(ws)] = time.time()
+    state.client_last_heartbeat[id(ws)] = time.time()  # 初始心跳 = 接入时刻，避免刚连上就被 TTL 误判
 
     # 同 uid 去重：扫描"除自己外"的同 uid 旧连接，全部驱逐。
     # 业务背景：
@@ -448,6 +496,10 @@ async def ws_tunnel(ws: WebSocket):
         while True:
             msg = await ws.receive_text()
             data = json.loads(msg)
+            # 心跳消息：bridge 每 10s 发送 {"type": "heartbeat"}，仅更新时间戳，不转发
+            if data.get("type") == "heartbeat":
+                state.client_last_heartbeat[id(ws)] = time.time()
+                continue
             req_id = data.get("req_id")
             if req_id and req_id in state.pending_queues:
                 touch_pending_request(req_id)
@@ -463,6 +515,7 @@ async def ws_tunnel(ws: WebSocket):
         state.client_cooldown_counts.pop(id(ws), None)
         state.client_uid_map.pop(id(ws), None)
         state.client_connected_at.pop(id(ws), None)
+        state.client_last_heartbeat.pop(id(ws), None)
         
         # 清理该节点的所有孤儿队列
         orphan_ids = state.ws_to_req_ids.pop(id(ws), set())
