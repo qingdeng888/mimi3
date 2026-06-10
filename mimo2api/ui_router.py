@@ -225,16 +225,40 @@ async def api_users_list():
 
     disabled = load_disabled_accounts()
 
+    # 获取各账号的随机延迟重建状态
+    from .manager import _account_managers
+    now_ts = time.time()
+
     users = []
     for data in results:
         uid = data.get("userId", "")
         disabled_info = disabled.get(str(uid))
+
+        # 检查该账号是否正在随机延迟等待重建
+        rebuild_delay_remaining = 0
+        mgr = _account_managers.get(str(uid))
+        if mgr and mgr._rebuild_delay_until > now_ts:
+            rebuild_delay_remaining = int(mgr._rebuild_delay_until - now_ts)
+
+        # 当实例状态为非运行态（NOT_CREATED/DESTROYED/空）且正在随机延迟中，
+        # 覆写 claw_status 显示给前端
+        claw_status = data.get("claw_status", "UNKNOWN")
+        if rebuild_delay_remaining > 0 and claw_status in ("NOT_CREATED", "DESTROYED", "", "UNKNOWN"):
+            minutes = rebuild_delay_remaining // 60
+            seconds = rebuild_delay_remaining % 60
+            if minutes > 0:
+                time_str = f"{minutes}分{seconds}秒"
+            else:
+                time_str = f"{seconds}秒"
+            claw_status = f"NOT_CREATED已过期/无环境（剩余{time_str}后重建）"
+
         users.append({
             "userId": uid,
             "name": data.get("name"),
             "serviceToken": data.get("serviceToken"),
-            "claw_status": data.get("claw_status", "UNKNOWN"),
+            "claw_status": claw_status,
             "remain_sec": data.get("remain_sec", 0),
+            "rebuild_delay_remaining": rebuild_delay_remaining,
             "disabled": disabled_info is not None,
             "disabled_reason": disabled_info.get("reason") if disabled_info else None,
             "disabled_at": disabled_info.get("disabled_at") if disabled_info else None,

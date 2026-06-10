@@ -739,6 +739,9 @@ class AccountManager:
         self.is_first_round = True
         # 连续失败计数器（创建失败 或 连接失败），达到阈值自动禁用
         self._consecutive_failures = 0
+        # 随机延迟重建的截止时间戳（Unix 秒）。> 0 表示当前正在等待随机延迟，
+        # WebUI 可以读取此值来展示"剩余 xx 时间后重建"。
+        self._rebuild_delay_until: float = 0
         # 单账号定向重建 event。被 trigger_rebuild_for_uid() 设置时，
         # 该账号正在挂起的 _interruptible_sleep_dual 会立刻唤醒并进入下一轮销毁重建，
         # 而其他账号（包括正在睡眠的）完全不受影响。
@@ -822,8 +825,10 @@ class AccountManager:
             # ---- 实例过期后随机延迟 1~30 分钟再创建，降低风控 ----
             if not _first_loop:
                 random_delay = random.randint(60, 1800)  # 1~30 分钟随机
+                self._rebuild_delay_until = time.time() + random_delay
                 self.logger.info(f"⏳ 实例已过期，随机延迟 {random_delay} 秒（{random_delay/60:.1f} 分钟）后再创建新实例，降低风控...")
                 await self._interruptible_sleep_dual(random_delay)
+                self._rebuild_delay_until = 0  # 延迟结束，清除标记
                 if self._rebuild_event.is_set():
                     self.logger.info(f"🔔 [{self.uid}] 随机延迟期间收到本账号重建信号，立即开始新一轮！")
                     self._rebuild_event.clear()
