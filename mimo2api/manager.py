@@ -100,6 +100,8 @@ DISABLED_ACCOUNTS_FILE = _persist_path("MIMO_DISABLED_ACCOUNTS_PATH", "disabled_
 PROXY_CONFIG_FILE = _persist_path("MIMO_PROXY_CONFIG_PATH", "proxy_config.json")
 # 自动禁用阈值：连续失败次数达到此值触发自动禁用
 AUTO_DISABLE_THRESHOLD = 5
+# 自动禁用账号的冷却恢复时间（秒）：4 小时后自动重新启用
+AUTO_DISABLE_COOLDOWN_SECONDS = 4 * 60 * 60  # 4 小时
 
 
 def load_disabled_accounts() -> dict[str, dict]:
@@ -180,6 +182,43 @@ def enable_account(uid: str) -> bool:
         logger.info(f"✅ 账号 {uid} 已解除禁用")
         return True
     return False
+
+
+def check_and_recover_auto_disabled_accounts() -> list[str]:
+    """检查自动禁用的账号是否已过冷却期（4小时），如果是则自动重新启用。
+
+    仅对 auto=True 的账号生效，手动禁用（auto=False）的账号不参与自动恢复。
+    返回本次被自动恢复的 uid 列表。
+    """
+    from datetime import datetime
+    recovered: list[str] = []
+    data = load_disabled_accounts()
+    now = datetime.now()
+
+    for uid, info in list(data.items()):
+        # 只处理自动禁用的账号；手动禁用的跳过
+        if not info.get("auto", False):
+            continue
+        disabled_at_str = info.get("disabled_at", "")
+        if not disabled_at_str:
+            continue
+        try:
+            disabled_at = datetime.strptime(disabled_at_str, "%Y-%m-%d %H:%M:%S")
+        except (ValueError, TypeError):
+            continue
+        elapsed_seconds = (now - disabled_at).total_seconds()
+        if elapsed_seconds >= AUTO_DISABLE_COOLDOWN_SECONDS:
+            # 冷却期已过，自动恢复
+            del data[uid]
+            recovered.append(uid)
+            logger.info(
+                f"🔄 账号 {uid} 自动禁用已冷却 {elapsed_seconds/3600:.1f} 小时（≥4小时），自动重新启用！"
+            )
+
+    if recovered:
+        save_disabled_accounts(data)
+
+    return recovered
 
 
 def _get_proxy_url() -> str | None:
@@ -839,7 +878,7 @@ class AccountManager:
                     # 达到阈值 → 自动禁用并销毁
                     if self._consecutive_failures >= AUTO_DISABLE_THRESHOLD:
                         self.logger.error(f"🚫 账号 {self.uid} 连续失败 {self._consecutive_failures} 次，自动禁用！")
-                        disable_account(self.uid, reason=f"连续创建/连接失败 {self._consecutive_failures} 次", auto=True)
+                        disable_account(self.uid, reason=f"(自动) 连续创建/连接失败 {self._consecutive_failures} 次", auto=True)
                         # 尝试销毁残余实例
                         try:
                             destroy_client = NativeClawClient(self.ph, self.cookies, self.logger)
@@ -1000,9 +1039,12 @@ async def start_manager_tasks():
         max_stagger_window = 50 * 60
         stagger_step = max_stagger_window // total_users if total_users > 1 else 0
 
+        # 每个账号之间间隔 3 分钟（180 秒）创建 Claw
+        CLAW_CREATION_INTERVAL = 180  # 秒
+
         for i, (uid, user_info) in enumerate(active_users.items()):
             stagger_offset = i * stagger_step
-            _spawn_account_task(uid, user_info, stagger_offset=stagger_offset, init_delay=i * 3.0)
+            _spawn_account_task(uid, user_info, stagger_offset=stagger_offset, init_delay=i * CLAW_CREATION_INTERVAL)
     else:
         logger.warning("⚠️ users/ 目录暂无可用账号（或全部已禁用），等待热加载新凭证...")
 
@@ -1014,6 +1056,13 @@ async def start_manager_tasks():
             current_uids = set(current_users.keys())
             managed_uids = set(_account_tasks.keys())
             disabled = load_disabled_accounts()
+
+            # === 自动恢复检查：冷却 4 小时后的自动禁用账号自动重新启用 ===
+            # 仅对 auto=True 的账号生效，手动禁用的账号只能手动启用
+            recovered_uids = check_and_recover_auto_disabled_accounts()
+            if recovered_uids:
+                # 刷新禁用列表（因为 check_and_recover 已经修改并保存了）
+                disabled = load_disabled_accounts()
 
             # 发现新账号（且未被禁用） → 拉起任务
             new_uids = current_uids - managed_uids
