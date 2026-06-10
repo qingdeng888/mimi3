@@ -811,11 +811,30 @@ class AccountManager:
 
     async def run_lifecycle(self):
         """核心流转逻辑"""
+        import random
+        _first_loop = True  # 首轮不延迟（由 init_delay 控制错峰），后续轮次随机延迟
         while True:
             # ---- 检查禁用状态 ----
             if is_account_disabled(self.uid):
                 self.logger.info(f"⏸️ 账号 {self.uid} 已被禁用，生命周期任务退出。")
                 return
+
+            # ---- 实例过期后随机延迟 1~30 分钟再创建，降低风控 ----
+            if not _first_loop:
+                random_delay = random.randint(60, 1800)  # 1~30 分钟随机
+                self.logger.info(f"⏳ 实例已过期，随机延迟 {random_delay} 秒（{random_delay/60:.1f} 分钟）后再创建新实例，降低风控...")
+                await self._interruptible_sleep_dual(random_delay)
+                if self._rebuild_event.is_set():
+                    self.logger.info(f"🔔 [{self.uid}] 随机延迟期间收到本账号重建信号，立即开始新一轮！")
+                    self._rebuild_event.clear()
+                elif rebuild_event.is_set():
+                    self.logger.info("🔔 随机延迟期间收到全局重建信号，立即开始新一轮！")
+                    rebuild_event.clear()
+                # 延迟结束后再次检查禁用状态（延迟期间可能被禁用）
+                if is_account_disabled(self.uid):
+                    self.logger.info(f"⏸️ 账号 {self.uid} 在延迟期间被禁用，生命周期任务退出。")
+                    return
+            _first_loop = False
 
             self.logger.info("=== 启动新一轮 Claw 生命周期 (设定运行阈值 55 分钟) ===")
             client = NativeClawClient(self.ph, self.cookies, self.logger)
