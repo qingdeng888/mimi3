@@ -918,9 +918,11 @@ class AccountManager:
                         except Exception:
                             pass
                         return
-                    # 连续失败但还没达到自动禁用阈值 → 等 60 秒再重试一轮；
-                    # 这段 sleep 必须能被重建信号打断，否则坏号会被吞 60s 才响应单账号定向重建。
-                    await self._interruptible_sleep_dual(60)
+                    # 连续失败但还没达到自动禁用阈值 → 随机等 15~180 秒再重试一轮；
+                    # 这段 sleep 必须能被重建信号打断，否则坏号会被吞很久才响应单账号定向重建。
+                    _backoff_delay = random.randint(15, 180)
+                    self.logger.info(f"等待 {_backoff_delay} 秒后进入下一轮创建重试...")
+                    await self._interruptible_sleep_dual(_backoff_delay)
                     if self._rebuild_event.is_set():
                         self.logger.info(f"🔔 [{self.uid}] 失败回退期间收到本账号重建信号，立即开启下一轮。")
                         self._rebuild_event.clear()
