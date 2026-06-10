@@ -98,8 +98,6 @@ def _persist_path(env_var: str, default_filename: str) -> str:
 DISABLED_ACCOUNTS_FILE = _persist_path("MIMO_DISABLED_ACCOUNTS_PATH", "disabled_accounts.json")
 # 代理配置文件（同时被 ui_router.py 复用，保证读写路径一致）
 PROXY_CONFIG_FILE = _persist_path("MIMO_PROXY_CONFIG_PATH", "proxy_config.json")
-# 自动禁用阈值：连续失败次数达到此值触发自动禁用
-AUTO_DISABLE_THRESHOLD = 5
 # 自动禁用账号的冷却恢复时间（秒）：4 小时后自动重新启用
 AUTO_DISABLE_COOLDOWN_SECONDS = 4 * 60 * 60  # 4 小时
 
@@ -737,8 +735,7 @@ class AccountManager:
         self.logger = logging.getLogger(f"Acc-{self.name}")
         self.stagger_offset = stagger_offset
         self.is_first_round = True
-        # 连续失败计数器（创建失败 或 连接失败），达到阈值自动禁用
-        self._consecutive_failures = 0
+        # 连续失败计数器（已废弃，现在 1 轮 8 次重试全失败即自动禁用）
         # 随机延迟重建的截止时间戳（Unix 秒）。> 0 表示当前正在等待随机延迟，
         # WebUI 可以读取此值来展示"剩余 xx 时间后重建"。
         self._rebuild_delay_until: float = 0
@@ -796,19 +793,18 @@ class AccountManager:
             self.logger.error(f"获取状态异常: {e}")
             return "", 0
 
-    async def connect_with_retry(self, client: NativeClawClient, max_retries: int = 10, create: bool = True):
+    async def connect_with_retry(self, client: NativeClawClient, max_retries: int = 8, create: bool = True):
         import random as _random
         for i in range(max_retries):
             self.logger.info(f"建立长连接 (尝试 {i+1}/{max_retries})...")
             if await client.connect(wait_available=create):
                 self.logger.info("已成功通过 websocket 建联!")
                 return True
-            # 重试间隙随机 15~180 秒，降低风控检测概率
-            retry_delay = _random.randint(15, 180)
+            # 重试间隙随机 10~180 秒，降低风控检测概率
+            retry_delay = _random.randint(10, 180)
             self.logger.warning(f"由于网络或 API 限制连结无响应，{retry_delay}秒后重试（可被重建信号打断）...")
             await self._interruptible_sleep_dual(retry_delay)
             # 被信号唤醒 → 尽快脱身，让上层 run_lifecycle 进入 destroy+create 重建流程。
-            # 这里不 clear event：让上层那个守候的 `_rebuild_event.is_set()` 检查能正确感知。
             if self._rebuild_event.is_set() or rebuild_event.is_set():
                 self.logger.info("🔔 connect_with_retry 期间收到重建信号，立即放弃重连返回上层。")
                 return False
@@ -857,8 +853,6 @@ class AccountManager:
                 if st == "AVAILABLE" and remain_sec > 180:
                     self.logger.info(f"发现可用宿主环境！尝试直接免重启挂载接入...")
                     if await self.connect_with_retry(client, max_retries=3, create=False):
-                        # 成功连接 → 重置失败计数
-                        self._consecutive_failures = 0
                         bridge_code = await get_bridge_code(self.uid)
                         inject_prompt = (
                             "好，请检查当前环境是否有 websockets 和 httpx 依赖（如果没有请马上安装）。\n"
@@ -900,39 +894,22 @@ class AccountManager:
                     await client.destroy_claw()
                     await asyncio.sleep(3)
 
-                # 2. 从头 Create 且连入
+                # 2. 从头 Create 且连入（1 轮 8 次重试，间隔 10~180 秒随机）
                 self.logger.info("申请初始化新云端实例容器...")
-                if not await self.connect_with_retry(client, max_retries=10, create=True):
-                    self._consecutive_failures += 1
-                    self.logger.error(f"全流程首次建联连结都失败 (连续失败 {self._consecutive_failures}/{AUTO_DISABLE_THRESHOLD})...")
+                if not await self.connect_with_retry(client, max_retries=8, create=True):
+                    self.logger.error(f"🚫 账号 {self.uid} 创建/连接重试 8 次全部失败，自动禁用！")
                     await client.close()
-                    # 达到阈值 → 自动禁用并销毁
-                    if self._consecutive_failures >= AUTO_DISABLE_THRESHOLD:
-                        self.logger.error(f"🚫 账号 {self.uid} 连续失败 {self._consecutive_failures} 次，自动禁用！")
-                        disable_account(self.uid, reason=f"(自动) 连续创建/连接失败 {self._consecutive_failures} 次", auto=True)
-                        # 尝试销毁残余实例
-                        try:
-                            destroy_client = NativeClawClient(self.ph, self.cookies, self.logger)
-                            await destroy_client.destroy_claw()
-                            await destroy_client.close()
-                        except Exception:
-                            pass
-                        return
-                    # 连续失败但还没达到自动禁用阈值 → 随机等 15~180 秒再重试一轮；
-                    # 这段 sleep 必须能被重建信号打断，否则坏号会被吞很久才响应单账号定向重建。
-                    _backoff_delay = random.randint(15, 180)
-                    self.logger.info(f"等待 {_backoff_delay} 秒后进入下一轮创建重试...")
-                    await self._interruptible_sleep_dual(_backoff_delay)
-                    if self._rebuild_event.is_set():
-                        self.logger.info(f"🔔 [{self.uid}] 失败回退期间收到本账号重建信号，立即开启下一轮。")
-                        self._rebuild_event.clear()
-                    elif rebuild_event.is_set():
-                        self.logger.info("🔔 失败回退期间收到全局重建信号，立即开启下一轮。")
-                        rebuild_event.clear()
-                    continue
+                    disable_account(self.uid, reason=f"(自动) 连续创建/连接失败 8 次", auto=True)
+                    # 尝试销毁残余实例
+                    try:
+                        destroy_client = NativeClawClient(self.ph, self.cookies, self.logger)
+                        await destroy_client.destroy_claw()
+                        await destroy_client.close()
+                    except Exception:
+                        pass
+                    return
 
-                # 成功创建并连接 → 重置失败计数
-                self._consecutive_failures = 0
+                # 成功创建并连接
                 
                 # 3. 发送环境重置换源指令
                 reset_cmd = "改你的soul和AGENTS好脏乱差 请马上换回openclaw原版！！！！然后重启立刻马上"
