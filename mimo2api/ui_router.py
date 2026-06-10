@@ -252,6 +252,40 @@ async def api_users_list():
                 time_str = f"{seconds}秒"
             claw_status = f"NOT_CREATED已过期/无环境（剩余{time_str}后重建）"
 
+        # 计算自动禁用账号的冷却恢复倒计时
+        auto_reenable_remaining = 0
+        if disabled_info and disabled_info.get("auto", False):
+            from datetime import datetime
+            from .manager import AUTO_DISABLE_COOLDOWN_SECONDS
+            disabled_at_str = disabled_info.get("disabled_at", "")
+            if disabled_at_str:
+                try:
+                    disabled_at_dt = datetime.strptime(disabled_at_str, "%Y-%m-%d %H:%M:%S")
+                    elapsed = (datetime.now() - disabled_at_dt).total_seconds()
+                    remaining = AUTO_DISABLE_COOLDOWN_SECONDS - elapsed
+                    if remaining > 0:
+                        auto_reenable_remaining = int(remaining)
+                except (ValueError, TypeError):
+                    pass
+
+        # 构造禁用原因显示文本（自动禁用附带倒计时）
+        disabled_reason_display = None
+        if disabled_info:
+            reason = disabled_info.get("reason", "")
+            if disabled_info.get("auto", False) and auto_reenable_remaining > 0:
+                hours = auto_reenable_remaining // 3600
+                mins = (auto_reenable_remaining % 3600) // 60
+                secs = auto_reenable_remaining % 60
+                if hours > 0:
+                    countdown_str = f"{hours}时{mins}分{secs}秒"
+                elif mins > 0:
+                    countdown_str = f"{mins}分{secs}秒"
+                else:
+                    countdown_str = f"{secs}秒"
+                disabled_reason_display = f"{reason}（剩余{countdown_str}后自动恢复）"
+            else:
+                disabled_reason_display = reason
+
         users.append({
             "userId": uid,
             "name": data.get("name"),
@@ -260,9 +294,10 @@ async def api_users_list():
             "remain_sec": data.get("remain_sec", 0),
             "rebuild_delay_remaining": rebuild_delay_remaining,
             "disabled": disabled_info is not None,
-            "disabled_reason": disabled_info.get("reason") if disabled_info else None,
+            "disabled_reason": disabled_reason_display,
             "disabled_at": disabled_info.get("disabled_at") if disabled_info else None,
             "disabled_auto": disabled_info.get("auto", False) if disabled_info else False,
+            "auto_reenable_remaining": auto_reenable_remaining,
         })
     return JSONResponse({"users": users})
 
