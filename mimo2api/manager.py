@@ -742,6 +742,9 @@ class AccountManager:
         # 随机延迟重建的截止时间戳（Unix 秒）。> 0 表示当前正在等待随机延迟，
         # WebUI 可以读取此值来展示"剩余 xx 时间后重建"。
         self._rebuild_delay_until: float = 0
+        # 标记本轮是否曾经成功运行过（创建+连接+注入成功）。
+        # 只有成功运行过期后才触发随机延迟重建；连续创建失败不触发（直接走禁用逻辑）。
+        self._had_successful_run: bool = False
         # 单账号定向重建 event。被 trigger_rebuild_for_uid() 设置时，
         # 该账号正在挂起的 _interruptible_sleep_dual 会立刻唤醒并进入下一轮销毁重建，
         # 而其他账号（包括正在睡眠的）完全不受影响。
@@ -793,17 +796,17 @@ class AccountManager:
             self.logger.error(f"获取状态异常: {e}")
             return "", 0
 
-    async def connect_with_retry(self, client: NativeClawClient, max_retries: int = 10, delay: int = 8, create: bool = True):
+    async def connect_with_retry(self, client: NativeClawClient, max_retries: int = 10, create: bool = True):
+        import random as _random
         for i in range(max_retries):
             self.logger.info(f"建立长连接 (尝试 {i+1}/{max_retries})...")
             if await client.connect(wait_available=create):
                 self.logger.info("已成功通过 websocket 建联!")
                 return True
-            # 重试间隙的 sleep 必须能被「单账号定向重建」/「全局重建」信号打断，
-            # 否则一只坏号最坏要等 max_retries * delay（默认 80s）才能进入下一轮重建，
-            # 与 cooldown 升级"立即重建"的语义严重不符。
-            self.logger.warning(f"由于网络或 API 限制连结无响应，{delay}秒后重试（可被重建信号打断）...")
-            await self._interruptible_sleep_dual(delay)
+            # 重试间隙随机 15~180 秒，降低风控检测概率
+            retry_delay = _random.randint(15, 180)
+            self.logger.warning(f"由于网络或 API 限制连结无响应，{retry_delay}秒后重试（可被重建信号打断）...")
+            await self._interruptible_sleep_dual(retry_delay)
             # 被信号唤醒 → 尽快脱身，让上层 run_lifecycle 进入 destroy+create 重建流程。
             # 这里不 clear event：让上层那个守候的 `_rebuild_event.is_set()` 检查能正确感知。
             if self._rebuild_event.is_set() or rebuild_event.is_set():
@@ -815,7 +818,6 @@ class AccountManager:
     async def run_lifecycle(self):
         """核心流转逻辑"""
         import random
-        _first_loop = True  # 首轮不延迟（由 init_delay 控制错峰），后续轮次随机延迟
         while True:
             # ---- 检查禁用状态 ----
             if is_account_disabled(self.uid):
@@ -823,7 +825,9 @@ class AccountManager:
                 return
 
             # ---- 实例过期后随机延迟 1~30 分钟再创建，降低风控 ----
-            if not _first_loop:
+            # 只有曾经成功运行过并正常过期的情况才触发随机延迟；
+            # 连续创建失败走的是自动禁用逻辑，不走随机延迟。
+            if self._had_successful_run:
                 random_delay = random.randint(60, 1800)  # 1~30 分钟随机
                 self._rebuild_delay_until = time.time() + random_delay
                 self.logger.info(f"⏳ 实例已过期，随机延迟 {random_delay} 秒（{random_delay/60:.1f} 分钟）后再创建新实例，降低风控...")
@@ -839,7 +843,8 @@ class AccountManager:
                 if is_account_disabled(self.uid):
                     self.logger.info(f"⏸️ 账号 {self.uid} 在延迟期间被禁用，生命周期任务退出。")
                     return
-            _first_loop = False
+                # 重置标记，下一轮需要再次成功才能触发延迟
+                self._had_successful_run = False
 
             self.logger.info("=== 启动新一轮 Claw 生命周期 (设定运行阈值 55 分钟) ===")
             client = NativeClawClient(self.ph, self.cookies, self.logger)
@@ -851,7 +856,7 @@ class AccountManager:
                 # 若寿命大于 3 分钟且状态为 AVAILABLE，跳过新建
                 if st == "AVAILABLE" and remain_sec > 180:
                     self.logger.info(f"发现可用宿主环境！尝试直接免重启挂载接入...")
-                    if await self.connect_with_retry(client, max_retries=3, delay=5, create=False):
+                    if await self.connect_with_retry(client, max_retries=3, create=False):
                         # 成功连接 → 重置失败计数
                         self._consecutive_failures = 0
                         bridge_code = await get_bridge_code(self.uid)
@@ -872,6 +877,8 @@ class AccountManager:
                             wait_time = max(60, wait_time - self.stagger_offset)
                             self.is_first_round = False
                         self.logger.info(f"容器直接复用成功！等待休眠 {wait_time} 秒直至其快过期时再触发完整的强制重建...")
+                        # 标记本轮成功运行，过期后才触发随机延迟
+                        self._had_successful_run = True
                         await self._interruptible_sleep_dual(wait_time)
                         if self._rebuild_event.is_set():
                             self.logger.info(f"🔔 [{self.uid}] 收到本账号定向重建信号，立即销毁重建！")
@@ -895,7 +902,7 @@ class AccountManager:
 
                 # 2. 从头 Create 且连入
                 self.logger.info("申请初始化新云端实例容器...")
-                if not await self.connect_with_retry(client, max_retries=5, delay=5, create=True):
+                if not await self.connect_with_retry(client, max_retries=10, create=True):
                     self._consecutive_failures += 1
                     self.logger.error(f"全流程首次建联连结都失败 (连续失败 {self._consecutive_failures}/{AUTO_DISABLE_THRESHOLD})...")
                     await client.close()
@@ -947,7 +954,7 @@ class AccountManager:
                 # 4. 重启完了，重新上线对接 (这次只是重新拿 ws_ticket 不用再去发 api create 请求)
                 self.logger.info("重启阶段结束，开始二阶段长连接恢复建联...")
                 client = NativeClawClient(self.ph, self.cookies, self.logger)
-                if not await self.connect_with_retry(client, max_retries=10, delay=8, create=False):
+                if not await self.connect_with_retry(client, max_retries=10, create=False):
                     self.logger.error("重连恢复环节掉线，不符合环境预期，打断本轮，回撤到头。")
                     await client.close()
                     continue
@@ -981,6 +988,9 @@ class AccountManager:
                     self.is_first_round = False
                     
                 self.logger.info(f"注入已完成落地！本地守护任务挂起休眠 {wait_time} 秒...")
+                
+                # 标记本轮成功运行，后续过期后才会触发随机延迟重建
+                self._had_successful_run = True
                 
                 # 关闭本地 ws，释放本地请求负荷，让内网 bridge 持续长留工作
                 await client.close()
