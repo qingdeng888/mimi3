@@ -98,8 +98,8 @@ def _persist_path(env_var: str, default_filename: str) -> str:
 DISABLED_ACCOUNTS_FILE = _persist_path("MIMO_DISABLED_ACCOUNTS_PATH", "disabled_accounts.json")
 # 代理配置文件（同时被 ui_router.py 复用，保证读写路径一致）
 PROXY_CONFIG_FILE = _persist_path("MIMO_PROXY_CONFIG_PATH", "proxy_config.json")
-# 自动禁用账号的冷却恢复时间（秒）：4 小时后自动重新启用
-AUTO_DISABLE_COOLDOWN_SECONDS = 4 * 60 * 60  # 4 小时
+# 自动禁用账号的冷却恢复时间（秒）：6 小时后自动重新启用
+AUTO_DISABLE_COOLDOWN_SECONDS = 6 * 60 * 60  # 6 小时
 
 
 def load_disabled_accounts() -> dict[str, dict]:
