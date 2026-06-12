@@ -104,6 +104,47 @@ def get_active_node_count() -> int:
     return len(_gw_state.active_clients)
 
 
+# 允许创建的条件：节点为 1 时，该节点需在线超过此时间才放行
+_NODE_ONLINE_MIN_MINUTES_BEFORE_CREATE = 45
+
+
+def is_creation_allowed() -> tuple[bool, str]:
+    """判断当前是否允许创建/注入新的 miclaw 节点。
+
+    规则：
+      - 在线节点数 = 0 → 允许
+      - 在线节点数 = 1 且该节点在线时间 ≥ 45 分钟 → 允许
+      - 其他情况（节点数 ≥ 2，或节点数 = 1 但在线不足 45 分钟）→ 不允许
+
+    返回 (allowed: bool, reason: str)
+    """
+    from .gateway_state import state as _gw_state
+    import time as _time
+
+    node_count = len(_gw_state.active_clients)
+    if node_count == 0:
+        return True, "在线节点数为 0，允许创建"
+
+    if node_count >= 2:
+        return False, f"在线节点数 {node_count} ≥ 2，不允许创建"
+
+    # node_count == 1：检查唯一节点的在线时长
+    ws = _gw_state.active_clients[0]
+    ws_id = id(ws)
+    connected_at = _gw_state.client_connected_at.get(ws_id, 0)
+    if connected_at == 0:
+        return False, "在线节点数为 1，但无法获取其接入时间，暂不允许创建"
+
+    online_seconds = _time.time() - connected_at
+    online_minutes = online_seconds / 60
+    threshold = _NODE_ONLINE_MIN_MINUTES_BEFORE_CREATE
+
+    if online_minutes >= threshold:
+        return True, f"在线节点数为 1，该节点已在线 {online_minutes:.1f} 分钟（≥{threshold}分钟），允许创建"
+    else:
+        return False, f"在线节点数为 1，该节点仅在线 {online_minutes:.1f} 分钟（<{threshold}分钟），暂不允许创建"
+
+
 def _persist_path(env_var: str, default_filename: str) -> str:
     """统一解析"可被环境变量覆盖"的持久化文件路径。
 
@@ -873,19 +914,18 @@ class AccountManager:
                 # 重置标记，下一轮需要再次成功才能触发延迟
                 self._had_successful_run = False
 
-            # ---- 等待内网通信节点连接数 ≤ 1 才允许创建 ----
-            # miclaw 每天每账号只能创建一次，为节约配额：
-            # 只有在线节点数为 0 或 1 时才允许创建，否则进入等待状态。
+            # ---- 等待允许创建条件满足 ----
+            # 规则：节点数=0 允许；节点数=1 且该节点在线≥45分钟 允许；其他情况等待。
             while True:
-                node_count = get_active_node_count()
-                if node_count <= 1:
-                    self.logger.info(f"✅ 当前在线节点数 {node_count} ≤ 1，允许进入创建流程。")
+                allowed, reason = is_creation_allowed()
+                if allowed:
+                    self.logger.info(f"✅ {reason}，允许进入创建流程。")
                     break
-                self.logger.info(f"⏸️ 当前在线节点数 {node_count} ≥ 2，进入等待创建状态，30秒后重新检查...")
+                self.logger.info(f"⏸️ {reason}，进入等待创建状态，30秒后重新检查...")
                 await self._interruptible_sleep_dual(30)
                 # 等待期间如果被禁用则退出
                 if is_account_disabled(self.uid):
-                    self.logger.info(f"⏸️ 账号 {self.uid} 在等待节点数下降期间被禁用，生命周期任务退出。")
+                    self.logger.info(f"⏸️ 账号 {self.uid} 在等待创建条件期间被禁用，生命周期任务退出。")
                     return
 
             self.logger.info("=== 启动新一轮 Claw 生命周期 (设定运行阈值 55 分钟) ===")
@@ -902,24 +942,24 @@ class AccountManager:
                 # ============================================================
                 self.logger.info("🔒 等待获取全局创建锁（同时只允许一个账号创建/注入 miclaw）...")
                 async with _claw_creation_lock:
-                    # 获取锁后检查节点数（等锁期间可能已有其他账号上线）
+                    # 获取锁后再次检查创建条件（等锁期间可能已有其他账号上线）
                     # 最多在锁内等待 5 分钟，超时后释放锁回到外层循环重新等待（避免死锁）
                     _lock_wait_start = time.time()
                     _lock_wait_timeout = 300  # 5 分钟
                     _node_check_passed = False
                     while (time.time() - _lock_wait_start) < _lock_wait_timeout:
-                        node_count = get_active_node_count()
-                        if node_count <= 1:
-                            self.logger.info(f"✅ 已获取创建锁，当前在线节点数 {node_count} ≤ 1，允许继续。")
+                        allowed, reason = is_creation_allowed()
+                        if allowed:
+                            self.logger.info(f"✅ 已获取创建锁，{reason}，允许继续。")
                             _node_check_passed = True
                             break
-                        self.logger.info(f"⏸️ 已获取创建锁，但当前在线节点数 {node_count} ≥ 2，等待节点数下降（30秒后重新检查）...")
+                        self.logger.info(f"⏸️ 已获取创建锁，但{reason}，等待条件满足（30秒后重新检查）...")
                         await asyncio.sleep(30)
                         if is_account_disabled(self.uid):
-                            self.logger.info(f"⏸️ 账号 {self.uid} 在锁内等待节点数下降期间被禁用，退出。")
+                            self.logger.info(f"⏸️ 账号 {self.uid} 在锁内等待创建条件期间被禁用，退出。")
                             return
                     if not _node_check_passed:
-                        self.logger.warning(f"⚠️ 锁内等待节点数下降超时（{_lock_wait_timeout}s），释放锁回到外层重新等待。")
+                        self.logger.warning(f"⚠️ 锁内等待创建条件满足超时（{_lock_wait_timeout}s），释放锁回到外层重新等待。")
                         continue
 
                     # ------ 路径 A：尝试复用可用容器 ------
