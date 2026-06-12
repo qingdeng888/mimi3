@@ -903,16 +903,24 @@ class AccountManager:
                 self.logger.info("🔒 等待获取全局创建锁（同时只允许一个账号创建/注入 miclaw）...")
                 async with _claw_creation_lock:
                     # 获取锁后检查节点数（等锁期间可能已有其他账号上线）
-                    while True:
+                    # 最多在锁内等待 5 分钟，超时后释放锁回到外层循环重新等待（避免死锁）
+                    _lock_wait_start = time.time()
+                    _lock_wait_timeout = 300  # 5 分钟
+                    _node_check_passed = False
+                    while (time.time() - _lock_wait_start) < _lock_wait_timeout:
                         node_count = get_active_node_count()
                         if node_count <= 1:
                             self.logger.info(f"✅ 已获取创建锁，当前在线节点数 {node_count} ≤ 1，允许继续。")
+                            _node_check_passed = True
                             break
                         self.logger.info(f"⏸️ 已获取创建锁，但当前在线节点数 {node_count} ≥ 2，等待节点数下降（30秒后重新检查）...")
                         await asyncio.sleep(30)
                         if is_account_disabled(self.uid):
                             self.logger.info(f"⏸️ 账号 {self.uid} 在锁内等待节点数下降期间被禁用，退出。")
                             return
+                    if not _node_check_passed:
+                        self.logger.warning(f"⚠️ 锁内等待节点数下降超时（{_lock_wait_timeout}s），释放锁回到外层重新等待。")
+                        continue
 
                     # ------ 路径 A：尝试复用可用容器 ------
                     reuse_success = False
