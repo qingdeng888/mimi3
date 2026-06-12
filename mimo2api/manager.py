@@ -946,7 +946,18 @@ class AccountManager:
                 # 确保前一个账号完整走完创建→注入→上线后，下一个账号才能开始创建。
                 self.logger.info("🔒 等待获取全局创建锁（同时只允许一个账号创建 miclaw）...")
                 async with _claw_creation_lock:
-                    self.logger.info("🔓 已获取全局创建锁，开始创建流程。")
+                    # 获取锁后再次检查节点数：等待锁期间其他账号可能已上线导致节点数增加
+                    while True:
+                        node_count = get_active_node_count()
+                        if node_count <= 1:
+                            break
+                        self.logger.info(f"⏸️ 已获取创建锁，但当前在线节点数 {node_count} ≥ 2，等待节点数下降后再创建（30秒后重新检查）...")
+                        await asyncio.sleep(30)
+                        if is_account_disabled(self.uid):
+                            self.logger.info(f"⏸️ 账号 {self.uid} 在锁内等待节点数下降期间被禁用，退出。")
+                            return
+
+                    self.logger.info(f"🔓 已获取全局创建锁，当前在线节点数 {get_active_node_count()} ≤ 1，开始创建流程。")
                     self.logger.info("申请初始化新云端实例容器...")
                     if not await self.connect_with_retry(client, max_retries=5, create=True):
                         self.logger.error(f"🚫 账号 {self.uid} 创建/连接重试 5 次全部失败，自动禁用！")
