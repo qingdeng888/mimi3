@@ -689,12 +689,13 @@
                         const rowOpacity = isDisabled ? 'opacity: 0.55;' : '';
                         const statusColor = u.claw_status === 'AVAILABLE' ? '#10B981' : (u.claw_status === 'EXPIRED(401)' ? '#EF4444' : '#F59E0B');
                         const disabledBadge = isDisabled
-                            ? `<div style="margin-top:4px;"><span style="background:#fef2f2; color:#DC2626; padding:2px 8px; border-radius:6px; font-size:11px; font-weight:600;">已禁用</span>
+                            ? `<div style="margin-top:4px;"><span style="background:#fef2f2; color:#DC2626; padding:2px 8px; border-radius:6px; font-size:11px; font-weight:600;">${u.disabled_auto ? '已自动禁用' : '已手动禁用'}</span>
                                <div style="font-size:11px; color:var(--text-muted); margin-top:2px;" title="${u.disabled_reason || ''}">${u.disabled_auto ? '(自动)' : '(手动)'} ${u.disabled_reason || ''}</div></div>`
                             : '';
-                        const disableBtn = isDisabled
+                        const isManualDisabled = isDisabled && !u.disabled_auto;
+                        const disableBtn = isManualDisabled
                             ? `<button class="btn" style="background:#10B981; margin-right:6px; font-size:12px; padding:6px 12px;" onclick="enableUser('${u.userId}')">启用</button>`
-                            : `<button class="btn" style="background:#9CA3AF; margin-right:6px; font-size:12px; padding:6px 12px;" onclick="disableUser('${u.userId}')">禁用</button>`;
+                            : `<button class="btn" style="background:#9CA3AF; margin-right:6px; font-size:12px; padding:6px 12px;" onclick="disableUser('${u.userId}')">手动禁用</button>`;
                         return `
                         <tr style="${rowOpacity}">
                             <td><strong style="color:var(--primary)">${u.userId}</strong>${disabledBadge}</td>
@@ -730,7 +731,7 @@
         }
 
         async function disableUser(uid) {
-            if(!confirm(`确定要禁用账号 ${uid} 吗？\n禁用后将立即销毁该账号的 Claw 实例，并停止自动重建。\n如需恢复可随时点击「启用」。`)) return;
+            if(!confirm(`确定要手动禁用账号 ${uid} 吗？\n手动禁用后将立即销毁该账号的 Claw 实例，并停止自动重建。\n手动禁用不会自动解除，如需恢复可点击「启用」。`)) return;
             try {
                 const res = await apiFetch(`/api/users/disable/${uid}`, {method: 'POST'});
                 const data = await res.json();

@@ -497,16 +497,19 @@ async def api_users_delete(uid: str):
 async def api_users_disable(uid: str):
     """手动禁用账号：标记禁用 + 触发销毁 mimo-claw"""
     from urllib.parse import quote
-    from .manager import disable_account, is_account_disabled, make_claw_action_http_client
+    from .manager import disable_account, is_account_disabled, load_disabled_accounts, make_claw_action_http_client
 
     target_file = os.path.join(USERS_DIR, f"user_{uid}.json")
     if not os.path.exists(target_file):
         return JSONResponse({"detail": "User not found"}, status_code=404)
 
-    if is_account_disabled(uid):
-        return JSONResponse({"status": "ok", "message": "该账号已处于禁用状态"})
+    # 如果已经是手动禁用状态，则无需重复操作
+    disabled_accounts = load_disabled_accounts()
+    disabled_info = disabled_accounts.get(str(uid))
+    if disabled_info and not disabled_info.get("auto", False):
+        return JSONResponse({"status": "ok", "message": "该账号已处于手动禁用状态"})
 
-    # 标记禁用
+    # 标记为手动禁用（如果之前是自动禁用，会被覆盖为手动禁用）
     disable_account(uid, reason="WebUI 手动禁用", auto=False)
 
     # 尝试销毁该账号的 mimo-claw 实例
