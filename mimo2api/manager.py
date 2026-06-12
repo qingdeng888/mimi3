@@ -76,7 +76,7 @@ WS_URL = "wss://aistudio.xiaomimimo.com/ws/proxy"
 _claw_creation_lock = asyncio.Lock()
 
 # 等待节点上线的最大超时时间（秒）
-_NODE_ONLINE_WAIT_TIMEOUT = 180  # 3 分钟
+_NODE_ONLINE_WAIT_TIMEOUT = 300  # 5 分钟
 
 
 async def _wait_for_node_online(uid: str, timeout: float = _NODE_ONLINE_WAIT_TIMEOUT) -> bool:
