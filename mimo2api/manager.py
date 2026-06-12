@@ -98,8 +98,8 @@ def _persist_path(env_var: str, default_filename: str) -> str:
 DISABLED_ACCOUNTS_FILE = _persist_path("MIMO_DISABLED_ACCOUNTS_PATH", "disabled_accounts.json")
 # 代理配置文件（同时被 ui_router.py 复用，保证读写路径一致）
 PROXY_CONFIG_FILE = _persist_path("MIMO_PROXY_CONFIG_PATH", "proxy_config.json")
-# 自动禁用账号的冷却恢复时间（秒）：6 小时后自动重新启用
-AUTO_DISABLE_COOLDOWN_SECONDS = 6 * 60 * 60  # 6 小时
+# 自动禁用账号的冷却恢复时间（秒）：24 小时后自动重新启用
+AUTO_DISABLE_COOLDOWN_SECONDS = 24 * 60 * 60  # 24 小时
 
 
 def load_disabled_accounts() -> dict[str, dict]:
@@ -183,7 +183,7 @@ def enable_account(uid: str) -> bool:
 
 
 def check_and_recover_auto_disabled_accounts() -> list[str]:
-    """检查自动禁用的账号是否已过冷却期（4小时），如果是则自动重新启用。
+    """检查自动禁用的账号是否已过冷却期（24小时），如果是则自动重新启用。
 
     仅对 auto=True 的账号生效，手动禁用（auto=False）的账号不参与自动恢复。
     返回本次被自动恢复的 uid 列表。
@@ -210,7 +210,7 @@ def check_and_recover_auto_disabled_accounts() -> list[str]:
             del data[uid]
             recovered.append(uid)
             logger.info(
-                f"🔄 账号 {uid} 自动禁用已冷却 {elapsed_seconds/3600:.1f} 小时（≥4小时），自动重新启用！"
+                f"🔄 账号 {uid} 自动禁用已冷却 {elapsed_seconds/3600:.1f} 小时（≥24小时），自动重新启用！"
             )
 
     if recovered:
@@ -793,15 +793,14 @@ class AccountManager:
             self.logger.error(f"获取状态异常: {e}")
             return "", 0
 
-    async def connect_with_retry(self, client: NativeClawClient, max_retries: int = 8, create: bool = True):
-        import random as _random
+    async def connect_with_retry(self, client: NativeClawClient, max_retries: int = 5, create: bool = True):
         for i in range(max_retries):
             self.logger.info(f"建立长连接 (尝试 {i+1}/{max_retries})...")
             if await client.connect(wait_available=create):
                 self.logger.info("已成功通过 websocket 建联!")
                 return True
-            # 重试间隙随机 10~180 秒，降低风控检测概率
-            retry_delay = _random.randint(10, 180)
+            # 重试间隙固定 8 秒
+            retry_delay = 8
             self.logger.warning(f"由于网络或 API 限制连结无响应，{retry_delay}秒后重试（可被重建信号打断）...")
             await self._interruptible_sleep_dual(retry_delay)
             # 被信号唤醒 → 尽快脱身，让上层 run_lifecycle 进入 destroy+create 重建流程。
@@ -894,12 +893,12 @@ class AccountManager:
                     await client.destroy_claw()
                     await asyncio.sleep(3)
 
-                # 2. 从头 Create 且连入（1 轮 8 次重试，间隔 10~180 秒随机）
+                # 2. 从头 Create 且连入（1 轮 5 次重试，间隔 8 秒）
                 self.logger.info("申请初始化新云端实例容器...")
-                if not await self.connect_with_retry(client, max_retries=8, create=True):
-                    self.logger.error(f"🚫 账号 {self.uid} 创建/连接重试 8 次全部失败，自动禁用！")
+                if not await self.connect_with_retry(client, max_retries=5, create=True):
+                    self.logger.error(f"🚫 账号 {self.uid} 创建/连接重试 5 次全部失败，自动禁用！")
                     await client.close()
-                    disable_account(self.uid, reason=f"(自动) 连续创建/连接失败 8 次", auto=True)
+                    disable_account(self.uid, reason=f"(自动) 连续创建/连接失败 5 次", auto=True)
                     # 尝试销毁残余实例
                     try:
                         destroy_client = NativeClawClient(self.ph, self.cookies, self.logger)
