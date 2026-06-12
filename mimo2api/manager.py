@@ -70,6 +70,19 @@ ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BASE_URL = "https://aistudio.xiaomimimo.com"
 WS_URL = "wss://aistudio.xiaomimimo.com/ws/proxy"
 
+# ----------------- 全局创建锁 & 节点数检查 -----------------
+# 同一时刻只允许一个账号处于"创建 miclaw"状态，其他账号排队等待。
+_claw_creation_lock = asyncio.Lock()
+
+# miclaw 过期后固定等待 24 小时才允许再次创建
+CLAW_EXPIRED_WAIT_SECONDS = 24 * 60 * 60  # 24 小时
+
+
+def get_active_node_count() -> int:
+    """获取当前内网通信节点在线连接数（即 gateway 中 active_clients 的长度）。"""
+    from .gateway_state import state as _gw_state
+    return len(_gw_state.active_clients)
+
 
 def _persist_path(env_var: str, default_filename: str) -> str:
     """统一解析"可被环境变量覆盖"的持久化文件路径。
@@ -735,12 +748,12 @@ class AccountManager:
         self.logger = logging.getLogger(f"Acc-{self.name}")
         self.stagger_offset = stagger_offset
         self.is_first_round = True
-        # 连续失败计数器（已废弃，现在 1 轮 8 次重试全失败即自动禁用）
-        # 随机延迟重建的截止时间戳（Unix 秒）。> 0 表示当前正在等待随机延迟，
+        # 连续失败计数器（已废弃，现在 1 轮 5 次重试全失败即自动禁用）
+        # 延迟重建的截止时间戳（Unix 秒）。> 0 表示当前正在等待延迟，
         # WebUI 可以读取此值来展示"剩余 xx 时间后重建"。
         self._rebuild_delay_until: float = 0
         # 标记本轮是否曾经成功运行过（创建+连接+注入成功）。
-        # 只有成功运行过期后才触发随机延迟重建；连续创建失败不触发（直接走禁用逻辑）。
+        # 只有成功运行过期后才触发 24 小时延迟重建；连续创建失败不触发（直接走禁用逻辑）。
         self._had_successful_run: bool = False
         # 单账号定向重建 event。被 trigger_rebuild_for_uid() 设置时，
         # 该账号正在挂起的 _interruptible_sleep_dual 会立刻唤醒并进入下一轮销毁重建，
@@ -812,27 +825,26 @@ class AccountManager:
 
     async def run_lifecycle(self):
         """核心流转逻辑"""
-        import random
         while True:
             # ---- 检查禁用状态 ----
             if is_account_disabled(self.uid):
                 self.logger.info(f"⏸️ 账号 {self.uid} 已被禁用，生命周期任务退出。")
                 return
 
-            # ---- 实例过期后随机延迟 1~30 分钟再创建，降低风控 ----
-            # 只有曾经成功运行过并正常过期的情况才触发随机延迟；
-            # 连续创建失败走的是自动禁用逻辑，不走随机延迟。
+            # ---- 实例过期后固定延迟 24 小时再创建（每天仅允许创建一次 miclaw）----
+            # 只有曾经成功运行过并正常过期的情况才触发等待；
+            # 连续创建失败走的是自动禁用逻辑，不走此延迟。
             if self._had_successful_run:
-                random_delay = random.randint(60, 1800)  # 1~30 分钟随机
-                self._rebuild_delay_until = time.time() + random_delay
-                self.logger.info(f"⏳ 实例已过期，随机延迟 {random_delay} 秒（{random_delay/60:.1f} 分钟）后再创建新实例，降低风控...")
-                await self._interruptible_sleep_dual(random_delay)
+                wait_seconds = CLAW_EXPIRED_WAIT_SECONDS  # 24 小时
+                self._rebuild_delay_until = time.time() + wait_seconds
+                self.logger.info(f"⏳ 实例已过期，固定延迟 {wait_seconds} 秒（{wait_seconds/3600:.1f} 小时）后再允许创建新实例...")
+                await self._interruptible_sleep_dual(wait_seconds)
                 self._rebuild_delay_until = 0  # 延迟结束，清除标记
                 if self._rebuild_event.is_set():
-                    self.logger.info(f"🔔 [{self.uid}] 随机延迟期间收到本账号重建信号，立即开始新一轮！")
+                    self.logger.info(f"🔔 [{self.uid}] 延迟期间收到本账号重建信号，立即开始新一轮！")
                     self._rebuild_event.clear()
                 elif rebuild_event.is_set():
-                    self.logger.info("🔔 随机延迟期间收到全局重建信号，立即开始新一轮！")
+                    self.logger.info("🔔 延迟期间收到全局重建信号，立即开始新一轮！")
                     rebuild_event.clear()
                 # 延迟结束后再次检查禁用状态（延迟期间可能被禁用）
                 if is_account_disabled(self.uid):
@@ -840,6 +852,21 @@ class AccountManager:
                     return
                 # 重置标记，下一轮需要再次成功才能触发延迟
                 self._had_successful_run = False
+
+            # ---- 等待内网通信节点连接数 ≤ 1 才允许创建 ----
+            # miclaw 每天每账号只能创建一次，为节约配额：
+            # 只有在线节点数为 0 或 1 时才允许创建，否则进入等待状态。
+            while True:
+                node_count = get_active_node_count()
+                if node_count <= 1:
+                    self.logger.info(f"✅ 当前在线节点数 {node_count} ≤ 1，允许进入创建流程。")
+                    break
+                self.logger.info(f"⏸️ 当前在线节点数 {node_count} ≥ 2，进入等待创建状态，30秒后重新检查...")
+                await self._interruptible_sleep_dual(30)
+                # 等待期间如果被禁用则退出
+                if is_account_disabled(self.uid):
+                    self.logger.info(f"⏸️ 账号 {self.uid} 在等待节点数下降期间被禁用，生命周期任务退出。")
+                    return
 
             self.logger.info("=== 启动新一轮 Claw 生命周期 (设定运行阈值 55 分钟) ===")
             client = NativeClawClient(self.ph, self.cookies, self.logger)
@@ -870,7 +897,7 @@ class AccountManager:
                             wait_time = max(60, wait_time - self.stagger_offset)
                             self.is_first_round = False
                         self.logger.info(f"容器直接复用成功！等待休眠 {wait_time} 秒直至其快过期时再触发完整的强制重建...")
-                        # 标记本轮成功运行，过期后才触发随机延迟
+                        # 标记本轮成功运行，过期后才触发 24 小时延迟
                         self._had_successful_run = True
                         await self._interruptible_sleep_dual(wait_time)
                         if self._rebuild_event.is_set():
@@ -894,19 +921,24 @@ class AccountManager:
                     await asyncio.sleep(3)
 
                 # 2. 从头 Create 且连入（1 轮 5 次重试，间隔 8 秒）
-                self.logger.info("申请初始化新云端实例容器...")
-                if not await self.connect_with_retry(client, max_retries=5, create=True):
-                    self.logger.error(f"🚫 账号 {self.uid} 创建/连接重试 5 次全部失败，自动禁用！")
-                    await client.close()
-                    disable_account(self.uid, reason=f"(自动) 连续创建/连接失败 5 次", auto=True)
-                    # 尝试销毁残余实例
-                    try:
-                        destroy_client = NativeClawClient(self.ph, self.cookies, self.logger)
-                        await destroy_client.destroy_claw()
-                        await destroy_client.close()
-                    except Exception:
-                        pass
-                    return
+                # 全局创建锁：同一时刻只允许一个账号处于"创建 miclaw"状态
+                self.logger.info("🔒 等待获取全局创建锁（同时只允许一个账号创建 miclaw）...")
+                async with _claw_creation_lock:
+                    self.logger.info("🔓 已获取全局创建锁，开始创建流程。")
+                    self.logger.info("申请初始化新云端实例容器...")
+                    if not await self.connect_with_retry(client, max_retries=5, create=True):
+                        self.logger.error(f"🚫 账号 {self.uid} 创建/连接重试 5 次全部失败，自动禁用！")
+                        await client.close()
+                        disable_account(self.uid, reason=f"(自动) 连续创建/连接失败 5 次", auto=True)
+                        # 尝试销毁残余实例
+                        try:
+                            destroy_client = NativeClawClient(self.ph, self.cookies, self.logger)
+                            await destroy_client.destroy_claw()
+                            await destroy_client.close()
+                        except Exception:
+                            pass
+                        return
+                    self.logger.info("🔓 创建成功，释放全局创建锁。")
 
                 # 成功创建并连接
                 
@@ -967,7 +999,7 @@ class AccountManager:
                     
                 self.logger.info(f"注入已完成落地！本地守护任务挂起休眠 {wait_time} 秒...")
                 
-                # 标记本轮成功运行，后续过期后才会触发随机延迟重建
+                # 标记本轮成功运行，后续过期后才会触发 24 小时延迟重建
                 self._had_successful_run = True
                 
                 # 关闭本地 ws，释放本地请求负荷，让内网 bridge 持续长留工作
@@ -1069,8 +1101,9 @@ async def start_manager_tasks():
             managed_uids = set(_account_tasks.keys())
             disabled = load_disabled_accounts()
 
-            # === 自动恢复检查：冷却 4 小时后的自动禁用账号自动重新启用 ===
+            # === 自动恢复检查：冷却 24 小时后的自动禁用账号自动重新启用 ===
             # 仅对 auto=True 的账号生效，手动禁用的账号只能手动启用
+            # 注意：恢复后的账号进入 run_lifecycle 仍需通过节点数检查（≤1）和全局创建锁
             recovered_uids = check_and_recover_auto_disabled_accounts()
             if recovered_uids:
                 # 刷新禁用列表（因为 check_and_recover 已经修改并保存了）
