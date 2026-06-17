@@ -739,7 +739,7 @@ class NativeClawClient:
                     await self.ws.send(json.dumps({
                         "type": "req", "id": str(uuid.uuid4()), "method": "connect",
                         "params": {
-                            "minProtocol": 3, "maxProtocol": 3,
+                            "minProtocol": 4, "maxProtocol": 4,
                             "client": {"id": "cli", "version": "mimo-claw-ui", "platform": "Linux x86_64", "mode": "cli"},
                             "role": "operator",
                             "scopes": ["operator.admin", "operator.read", "operator.write", "operator.approvals", "operator.pairing"],
