@@ -794,13 +794,14 @@ class AccountManager:
             return "", 0
 
     async def connect_with_retry(self, client: NativeClawClient, max_retries: int = 5, create: bool = True):
+        import random
         for i in range(max_retries):
             self.logger.info(f"建立长连接 (尝试 {i+1}/{max_retries})...")
             if await client.connect(wait_available=create):
                 self.logger.info("已成功通过 websocket 建联!")
                 return True
-            # 重试间隙固定 8 秒
-            retry_delay = 8
+            # 重试间隙随机 20~60 秒
+            retry_delay = random.randint(20, 60)
             self.logger.warning(f"由于网络或 API 限制连结无响应，{retry_delay}秒后重试...")
             await asyncio.sleep(retry_delay)
             # 被禁用则退出
@@ -919,10 +920,10 @@ class AccountManager:
 
                         # 2. 创建新实例
                         self.logger.info("申请初始化新云端实例容器...")
-                        if not await self.connect_with_retry(client, max_retries=5, create=True):
-                            self.logger.error(f"🚫 账号 {self.uid} 创建/连接重试 5 次全部失败，自动禁用！")
+                        if not await self.connect_with_retry(client, max_retries=20, create=True):
+                            self.logger.error(f"🚫 账号 {self.uid} 创建/连接重试 20 次全部失败，自动禁用！")
                             await client.close()
-                            disable_account(self.uid, reason=f"(自动) 连续创建/连接失败 5 次", auto=True)
+                            disable_account(self.uid, reason=f"(自动) 连续创建/连接失败 20 次", auto=True)
                             return  # 创建失败，锁自动释放
 
                         # 3. 发送环境重置换源指令
