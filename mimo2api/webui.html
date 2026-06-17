@@ -715,7 +715,7 @@
                             </td>
                             <td>
                                 ${disableBtn}
-                                <button class="btn btn-primary" onclick="recreateUser('${u.userId}')" style="margin-right:6px; font-size:12px; padding:6px 12px;" ${isDisabled ? 'disabled title="请先启用"' : ''}>重建</button>
+                                <button class="btn btn-danger" onclick="destroyClaw('${u.userId}')" style="margin-right:6px; font-size:12px; padding:6px 12px;" ${isDisabled ? 'disabled title="请先启用"' : ''}>销毁miclaw</button>
                                 <button class="btn btn-danger" onclick="deleteUser('${u.userId}')" style="font-size:12px; padding:6px 12px;">删除</button>
                             </td>
                         </tr>`;
@@ -731,7 +731,7 @@
         }
 
         async function disableUser(uid) {
-            if(!confirm(`确定要手动禁用账号 ${uid} 吗？\n手动禁用后将立即销毁该账号的 Claw 实例，并停止自动重建。\n手动禁用不会自动解除，如需恢复可点击「启用」。`)) return;
+            if(!confirm(`确定要手动禁用账号 ${uid} 吗？\n手动禁用后将停止该账号的生命周期管理。\n手动禁用不会自动解除，如需恢复可点击「启用」。`)) return;
             try {
                 const res = await apiFetch(`/api/users/disable/${uid}`, {method: 'POST'});
                 const data = await res.json();
@@ -821,21 +821,21 @@
             });
         }
 
-        async function recreateUser(uid) {
-            if(!confirm(`确定要对账号 ${uid} 执行「销毁 + 重建」操作？\n这将销毁当前容器并尝试创建新环境（约需 30-60 秒）。`)) return;
-            showToast(`正在为 ${uid} 重建环境，请稍候...`);
+        async function destroyClaw(uid) {
+            if(!confirm(`确定要销毁账号 ${uid} 的 miclaw 容器吗？\n销毁后该容器将不可恢复（每天只能创建一次）。`)) return;
+            showToast(`正在销毁 ${uid} 的 miclaw 容器...`);
             try {
-                const res = await apiFetch(`/api/users/recreate/${uid}`, {method: 'POST'});
+                const res = await apiFetch(`/api/users/destroy/${uid}`, {method: 'POST'});
                 const data = await res.json();
                 if(res.ok) {
-                    showToast(`${uid} 环境重建成功！`);
+                    showToast(`${uid} 的 miclaw 容器已销毁`);
                     fetchUsers();
                 } else {
-                    showToast(`重建失败: ${data.detail || '未知错误'}`, 'error');
+                    showToast(`销毁失败: ${data.detail || '未知错误'}`, 'error');
                 }
             } catch(e) {
                 if (e.message !== 'UNAUTHORIZED') {
-                    showToast('重建请求异常: ' + e.message, 'error');
+                    showToast('销毁请求异常: ' + e.message, 'error');
                 }
             }
         }
@@ -1235,7 +1235,7 @@
                 }
                 tbody.innerHTML = data.clients.map(c => {
                     const cooldownTooltip = c.in_cooldown
-                        ? `冷却剩余 ${c.cooldown_remaining_seconds} 秒（累计冷却 ${c.cooldown_count} 次，达阈值会触发自动重建）`
+                        ? `冷却剩余 ${c.cooldown_remaining_seconds} 秒（累计冷却 ${c.cooldown_count} 次，达阈值会自动断开）`
                         : (c.cooldown_count > 0 ? `已累计冷却 ${c.cooldown_count} 次（重连后清零）` : '在线');
                     const statusBadge = c.in_cooldown
                         ? `<span class="badge warn" style="font-size:11px;" title="${cooldownTooltip}">冷却中 (${c.cooldown_remaining_seconds}s · 第${c.cooldown_count}次)</span>`
@@ -1248,7 +1248,7 @@
                     const pendingColor = c.pending_requests > 0 ? 'color:var(--primary);font-weight:600;' : 'color:var(--text-muted);';
                     // 「归属账号」单元格：优先显示 user_<uid>.json 里的备注名（粗体），
                     // userId 作为次行的灰色小字，便于运维同时看到友好名 + 真实 ID。
-                    // 老版 bridge 没上报 uid 时仍显示警告徽章，cooldown 升级会 fallback 到全局重建。
+                    // 老版 bridge 没上报 uid 时仍显示警告徽章。
                     let uidCell;
                     if (c.uid) {
                         const friendly = (c.name || '').trim();
@@ -1263,7 +1263,7 @@
                             <div style="font-family:monospace; font-size:11px; color:var(--text-muted); margin-top:2px;">${escapeHtml(c.uid)}</div>
                         </div>`;
                     } else {
-                        uidCell = '<span class="badge warn" style="font-size:11px;" title="老版 bridge 未携带 uid，cooldown 升级时会 fallback 到全局重建">未上报</span>';
+                        uidCell = '<span class="badge warn" style="font-size:11px;" title="老版 bridge 未携带 uid">未上报</span>';
                     }
                     return `<tr>
                         <td style="color:var(--text-muted); font-variant-numeric:tabular-nums;">${c.index + 1}</td>

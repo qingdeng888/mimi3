@@ -21,45 +21,8 @@ from urllib.parse import quote
 import httpx
 import websockets
 
-# 手动重建信号
-rebuild_event = asyncio.Event()
-
-async def interruptible_sleep(seconds: int):
-    """可被 rebuild_event 打断的 sleep"""
-    try:
-        await asyncio.wait_for(rebuild_event.wait(), timeout=seconds)
-    except asyncio.TimeoutError:
-        pass
-
-def trigger_rebuild():
-    """供外部调用，触发所有账号强制重建"""
-    rebuild_event.set()
-
-
-# uid -> AccountManager 的注册表（在 _spawn_account_task 中维护）。
-# 用于支持 trigger_rebuild_for_uid() 做「单账号定向重建」，
-# 这是 401 累计冷却阈值后的精准升级路径，避免一只坏号拖死其他健康账号。
+# uid -> AccountManager 的注册表
 _account_managers: dict[str, "AccountManager"] = {}
-
-
-def trigger_rebuild_for_uid(uid: str) -> bool:
-    """触发单个账号定向重建（不影响其他账号）。
-
-    返回 True 表示找到对应 AccountManager 且已 set 其 per-account event；
-    返回 False 表示找不到（uid 拼写错误 / 账号已被禁用 / 老版 bridge 没传 uid 等），
-    调用方应自行决定是否 fallback 到全局 ``trigger_rebuild()``。
-    """
-    if not uid:
-        return False
-    mgr = _account_managers.get(str(uid))
-    if mgr is None:
-        return False
-    try:
-        mgr.signal_rebuild()
-    except Exception as e:  # 极端情况下 event loop 已关闭等
-        logger.warning(f"trigger_rebuild_for_uid({uid}) 失败: {e}")
-        return False
-    return True
 
 # 配置日志格式
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - [%(name)s] - %(levelname)s - %(message)s")
@@ -809,45 +772,8 @@ class AccountManager:
         self.logger = logging.getLogger(f"Acc-{self.name}")
         self.stagger_offset = stagger_offset
         self.is_first_round = True
-        # 连续失败计数器（已废弃，现在 1 轮 5 次重试全失败即自动禁用）
-        # 延迟重建的截止时间戳（Unix 秒）。> 0 表示当前正在等待延迟，
-        # WebUI 可以读取此值来展示"剩余 xx 时间后重建"。
         self._rebuild_delay_until: float = 0
-        # 标记本轮是否曾经成功运行过（创建+连接+注入成功）。
-        # 只有成功运行过期后才触发 24 小时延迟重建；连续创建失败不触发（直接走禁用逻辑）。
         self._had_successful_run: bool = False
-        # 单账号定向重建 event。被 trigger_rebuild_for_uid() 设置时，
-        # 该账号正在挂起的 _interruptible_sleep_dual 会立刻唤醒并进入下一轮销毁重建，
-        # 而其他账号（包括正在睡眠的）完全不受影响。
-        # 注意：asyncio.Event 必须在 event loop 内创建，AccountManager 实例
-        # 是在 _spawn_account_task 内创建的，那时已经有运行中的 loop，安全。
-        self._rebuild_event: asyncio.Event = asyncio.Event()
-
-    def signal_rebuild(self) -> None:
-        """对外暴露的"请求该账号立即重建"接口（trigger_rebuild_for_uid 内部调用）。"""
-        self._rebuild_event.set()
-
-    async def _interruptible_sleep_dual(self, seconds: int) -> None:
-        """同时被全局 rebuild_event 与本账号 _rebuild_event 唤醒的 sleep。
-
-        - 任一 event 被 set → 立即返回（caller 在循环末尾自行判断哪一个并 clear）
-        - 两个都没 set 且超时 → 自然返回，进入下一轮重建周期
-        """
-        waiters = [
-            asyncio.create_task(rebuild_event.wait()),
-            asyncio.create_task(self._rebuild_event.wait()),
-        ]
-        try:
-            await asyncio.wait_for(
-                asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED),
-                timeout=seconds,
-            )
-        except asyncio.TimeoutError:
-            pass
-        finally:
-            for w in waiters:
-                if not w.done():
-                    w.cancel()
 
     async def get_instance_status(self) -> tuple[str, int]:
         """获取当前容器的状态和剩余时间(秒)"""
@@ -875,17 +801,19 @@ class AccountManager:
                 return True
             # 重试间隙固定 8 秒
             retry_delay = 8
-            self.logger.warning(f"由于网络或 API 限制连结无响应，{retry_delay}秒后重试（可被重建信号打断）...")
-            await self._interruptible_sleep_dual(retry_delay)
-            # 被信号唤醒 → 尽快脱身，让上层 run_lifecycle 进入 destroy+create 重建流程。
-            if self._rebuild_event.is_set() or rebuild_event.is_set():
-                self.logger.info("🔔 connect_with_retry 期间收到重建信号，立即放弃重连返回上层。")
+            self.logger.warning(f"由于网络或 API 限制连结无响应，{retry_delay}秒后重试...")
+            await asyncio.sleep(retry_delay)
+            # 被禁用则退出
+            if is_account_disabled(self.uid):
+                self.logger.info(f"⏸️ 账号 {self.uid} 在连接重试期间被禁用，放弃连接。")
                 return False
         self.logger.error("连接 Claw 超过最大重试次数")
         return False
 
     async def run_lifecycle(self):
-        """核心流转逻辑"""
+        """核心流转逻辑：创建 miclaw 并注入 bridge，然后等待自然过期，过期后 24 小时延迟再创建下一个。
+        任何情况都不自动销毁容器，销毁只能通过 WebUI 手动触发。
+        """
         while True:
             # ---- 检查禁用状态 ----
             if is_account_disabled(self.uid):
@@ -893,42 +821,30 @@ class AccountManager:
                 return
 
             # ---- 实例过期后固定延迟 24 小时再创建（每天仅允许创建一次 miclaw）----
-            # 只有曾经成功运行过并正常过期的情况才触发等待；
-            # 连续创建失败走的是自动禁用逻辑，不走此延迟。
             if self._had_successful_run:
                 wait_seconds = CLAW_EXPIRED_WAIT_SECONDS  # 24 小时
                 self._rebuild_delay_until = time.time() + wait_seconds
                 self.logger.info(f"⏳ 实例已过期，固定延迟 {wait_seconds} 秒（{wait_seconds/3600:.1f} 小时）后再允许创建新实例...")
-                await self._interruptible_sleep_dual(wait_seconds)
-                self._rebuild_delay_until = 0  # 延迟结束，清除标记
-                if self._rebuild_event.is_set():
-                    self.logger.info(f"🔔 [{self.uid}] 延迟期间收到本账号重建信号，立即开始新一轮！")
-                    self._rebuild_event.clear()
-                elif rebuild_event.is_set():
-                    self.logger.info("🔔 延迟期间收到全局重建信号，立即开始新一轮！")
-                    rebuild_event.clear()
-                # 延迟结束后再次检查禁用状态（延迟期间可能被禁用）
+                await asyncio.sleep(wait_seconds)
+                self._rebuild_delay_until = 0
                 if is_account_disabled(self.uid):
                     self.logger.info(f"⏸️ 账号 {self.uid} 在延迟期间被禁用，生命周期任务退出。")
                     return
-                # 重置标记，下一轮需要再次成功才能触发延迟
                 self._had_successful_run = False
 
             # ---- 等待允许创建条件满足 ----
-            # 规则：节点数=0 允许；节点数=1 且该节点在线≥45分钟 允许；其他情况等待。
             while True:
                 allowed, reason = is_creation_allowed()
                 if allowed:
                     self.logger.info(f"✅ {reason}，允许进入创建流程。")
                     break
                 self.logger.info(f"⏸️ {reason}，进入等待创建状态，30秒后重新检查...")
-                await self._interruptible_sleep_dual(30)
-                # 等待期间如果被禁用则退出
+                await asyncio.sleep(30)
                 if is_account_disabled(self.uid):
                     self.logger.info(f"⏸️ 账号 {self.uid} 在等待创建条件期间被禁用，生命周期任务退出。")
                     return
 
-            self.logger.info("=== 启动新一轮 Claw 生命周期 (设定运行阈值 55 分钟) ===")
+            self.logger.info("=== 启动 Claw 创建流程（创建后不自动销毁，等待自然过期） ===")
             client = NativeClawClient(self.ph, self.cookies, self.logger)
             try:
                 # 0. 探测现有实例状态
@@ -995,9 +911,9 @@ class AccountManager:
 
                     # ------ 路径 B：全量创建（复用失败或状态非 AVAILABLE）------
                     if not reuse_success:
-                        # 1. 尝试主动销毁
-                        if st != "DESTROYED":
-                            self.logger.info("准备强制主动销毁残余不再健康的 Claw 实例...")
+                        # 1. 清理残余非健康实例（仅非 DESTROYED/NOT_CREATED 才需要清理）
+                        if st not in ("DESTROYED", "NOT_CREATED", ""):
+                            self.logger.info("准备清理残余不健康的 Claw 实例...")
                             await client.destroy_claw()
                             await asyncio.sleep(3)
 
@@ -1007,12 +923,6 @@ class AccountManager:
                             self.logger.error(f"🚫 账号 {self.uid} 创建/连接重试 5 次全部失败，自动禁用！")
                             await client.close()
                             disable_account(self.uid, reason=f"(自动) 连续创建/连接失败 5 次", auto=True)
-                            try:
-                                destroy_client = NativeClawClient(self.ph, self.cookies, self.logger)
-                                await destroy_client.destroy_claw()
-                                await destroy_client.close()
-                            except Exception:
-                                pass
                             return  # 创建失败，锁自动释放
 
                         # 3. 发送环境重置换源指令
@@ -1021,8 +931,8 @@ class AccountManager:
                         reply1 = await client.send_message(reset_cmd, timeout=120)
                         self.logger.info(f"[收到的重置反馈回复]: {reply1}")
 
-                        self.logger.info("强制等待 Claw 服务端反向重启断联 (15s，可被重建信号提前唤醒)...")
-                        await self._interruptible_sleep_dual(15)
+                        self.logger.info("强制等待 Claw 服务端反向重启断联 (15s)...")
+                        await asyncio.sleep(15)
 
                         self.logger.info("清扫刚才的断裂残留并让路...")
                         await client.close()
@@ -1032,7 +942,7 @@ class AccountManager:
                         self.logger.info("重启阶段结束，开始二阶段长连接恢复建联...")
                         client = NativeClawClient(self.ph, self.cookies, self.logger)
                         if not await self.connect_with_retry(client, max_retries=10, create=False):
-                            self.logger.error("重连恢复环节掉线，不符合环境预期，打断本轮。释放全局创建锁。")
+                            self.logger.error("重连恢复环节掉线，释放全局创建锁回到外层重试。")
                             await client.close()
                             continue  # 重连失败，锁自动释放
 
@@ -1061,39 +971,20 @@ class AccountManager:
 
                 # === 全局创建锁已释放 ===
 
-                # 复用路径成功：进入休眠等待容器过期
+                # 创建/复用成功后，等待容器自然过期（不自动销毁）
                 if reuse_success:
-                    wait_time = remain_sec - 120
-                    if self.is_first_round and self.stagger_offset > 0:
-                        wait_time = max(60, wait_time - self.stagger_offset)
-                        self.is_first_round = False
-                    self.logger.info(f"容器直接复用成功！等待休眠 {wait_time} 秒直至其快过期时再触发完整的强制重建...")
-                    self._had_successful_run = True
-                    await self._interruptible_sleep_dual(wait_time)
-                    if self._rebuild_event.is_set():
-                        self.logger.info(f"🔔 [{self.uid}] 收到本账号定向重建信号，立即销毁重建！")
-                        self._rebuild_event.clear()
-                    elif rebuild_event.is_set():
-                        self.logger.info("🔔 收到全局重建信号，立即销毁重建！")
-                        rebuild_event.clear()
-                    continue
-
-                # 全量创建路径成功：本地挂起 55 分钟
-                wait_time = 55 * 60
+                    wait_time = max(60, remain_sec)
+                else:
+                    wait_time = 60 * 60  # 容器最长约 60 分钟寿命
                 if self.is_first_round and self.stagger_offset > 0:
                     wait_time = max(60, wait_time - self.stagger_offset)
                     self.is_first_round = False
 
-                self.logger.info(f"注入已完成落地！本地守护任务挂起休眠 {wait_time} 秒...")
+                self.logger.info(f"✅ 注入完成！等待容器自然过期（约 {wait_time} 秒），不会自动销毁。")
                 self._had_successful_run = True
                 await client.close()
-                await self._interruptible_sleep_dual(wait_time)
-                if self._rebuild_event.is_set():
-                    self.logger.info(f"🔔 [{self.uid}] 收到本账号定向重建信号，立即销毁重建！")
-                    self._rebuild_event.clear()
-                elif rebuild_event.is_set():
-                    self.logger.info("🔔 收到全局重建信号，立即销毁重建！")
-                    rebuild_event.clear()
+                await asyncio.sleep(wait_time)
+                self.logger.info("⏰ 等待时间结束，容器应已自然过期，进入 24 小时延迟等待下一轮创建。")
 
             except asyncio.CancelledError:
                 await client.close()
@@ -1102,14 +993,7 @@ class AccountManager:
             except Exception as e:
                 self.logger.error(f"严重异常，生命周期阻断: {e}", exc_info=True)
                 await client.close()
-                # 兜底 sleep 也必须监听重建信号：账号刚抛异常时往往是最该被立刻重建的时刻。
-                await self._interruptible_sleep_dual(60)
-                if self._rebuild_event.is_set():
-                    self.logger.info(f"🔔 [{self.uid}] 异常回退期间收到本账号重建信号，立即开启下一轮。")
-                    self._rebuild_event.clear()
-                elif rebuild_event.is_set():
-                    self.logger.info("🔔 异常回退期间收到全局重建信号，立即开启下一轮。")
-                    rebuild_event.clear()
+                await asyncio.sleep(60)
 
 # 全局任务注册表：uid -> asyncio.Task，供热加载使用
 _account_tasks: dict[str, asyncio.Task] = {}
@@ -1119,7 +1003,6 @@ _HOTRELOAD_INTERVAL = 10  # 每 10 秒扫描一次 users/ 目录
 def _spawn_account_task(uid: str, user_info: dict, stagger_offset: int = 0, init_delay: float = 0):
     """为单个账号创建并注册后台生命周期任务"""
     manager = AccountManager(uid, user_info, stagger_offset=stagger_offset)
-    # 注册到 uid -> manager 表，使 trigger_rebuild_for_uid() 能精准 set 其 _rebuild_event
     _account_managers[str(uid)] = manager
 
     async def _run():
@@ -1128,15 +1011,6 @@ def _spawn_account_task(uid: str, user_info: dict, stagger_offset: int = 0, init
         try:
             await manager.run_lifecycle()
         finally:
-            # ⚠️ 必须用「指纹比对」而不是无脑 pop：仅当注册表里那个 manager 还指向"我自己"时才移除。
-            #
-            # 反例（不比对的 race）：
-            #   1. 禁用 A → 热加载 cancel(旧 task) + pop _account_managers[A]
-            #   2. 旧 task 收到 CancelledError，但 finally 还在 await 链中没跑完
-            #   3. 启用 A → 下一轮热加载 spawn 新 task，新 manager 注册到 _account_managers[A]
-            #   4. 旧 task 的 finally 终于跑到 → 无脑 pop 把刚注册的新 manager 误删
-            #   5. 之后 trigger_rebuild_for_uid(A) 永远找不到 manager → 静默 fallback 全局重建
-            #      （单账号定向重建功能从此失效，需要重启进程才能恢复）
             if _account_managers.get(str(uid)) is manager:
                 _account_managers.pop(str(uid), None)
 

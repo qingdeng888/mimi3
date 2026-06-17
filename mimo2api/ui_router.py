@@ -250,7 +250,7 @@ async def api_users_list():
                 time_str = f"{minutes}分{seconds}秒"
             else:
                 time_str = f"{seconds}秒"
-            claw_status = f"NOT_CREATED已过期/无环境（剩余{time_str}后重建）"
+            claw_status = f"NOT_CREATED已过期/无环境（剩余{time_str}后创建）"
 
         # 计算自动禁用账号的冷却恢复倒计时
         auto_reenable_remaining = 0
@@ -345,11 +345,11 @@ async def api_users_add(request: Request):
     except Exception as e:
         return JSONResponse({"detail": str(e)}, status_code=500)
 
-@router.post("/api/users/recreate/{uid}")
-async def api_users_recreate(uid: str):
-    """手动触发单个账号的销毁 + 创建流程"""
+@router.post("/api/users/destroy/{uid}")
+async def api_users_destroy(uid: str):
+    """手动销毁单个账号的 miclaw 容器（仅销毁，不重建）"""
     from urllib.parse import quote
-    from .manager import _get_proxy_url, make_claw_action_http_client
+    from .manager import make_claw_action_http_client
 
     target_file = os.path.join(USERS_DIR, f"user_{uid}.json")
     if not os.path.exists(target_file):
@@ -372,73 +372,25 @@ async def api_users_recreate(uid: str):
         "Content-Type": "application/json",
         "Origin": "https://aistudio.xiaomimimo.com",
         "Referer": "https://aistudio.xiaomimimo.com/",
-        "x-timezone": "Asia/Shanghai",
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     }
-    base = "https://aistudio.xiaomimimo.com"
+    destroy_url = f"https://aistudio.xiaomimimo.com/open-apis/user/mimo-claw/destroy?xiaomichatbot_ph={quote(ph)}"
 
-    # === 动作阶段：协议签署 + 销毁 + 创建 → 一条携趣短效代理走完 ===
-    async with await make_claw_action_http_client(timeout=30) as client:
-        # 0. 签署用户协议（首次创建必须，后续调也无副作用）
-        try:
-            agree_url = f"{base}/open-apis/agreement/user/mimo-claw?xiaomichatbot_ph={quote(ph)}"
-            await client.post(agree_url, cookies=cookies, headers=headers, timeout=15)
-        except Exception:
-            pass
-
-        # 1. 销毁旧实例
-        try:
-            destroy_url = f"{base}/open-apis/user/mimo-claw/destroy?xiaomichatbot_ph={quote(ph)}"
-            await client.post(destroy_url, cookies=cookies, headers=headers, timeout=15)
-            await asyncio.sleep(3)
-        except Exception:
-            pass
-
-        # 2. 创建新实例
-        create_url = f"{base}/open-apis/user/mimo-claw/create?xiaomichatbot_ph={quote(ph)}"
-        try:
-            r = await client.post(create_url, cookies=cookies, headers=headers, timeout=20)
+    try:
+        async with await make_claw_action_http_client(timeout=15) as client:
+            r = await client.post(destroy_url, cookies=cookies, headers=headers, timeout=15)
             if r.status_code == 401:
                 return JSONResponse({"detail": "凭证已过期 (401)，请重新导入 Cookie"}, status_code=401)
-        except Exception as e:
-            return JSONResponse({"detail": f"创建请求异常: {e}"}, status_code=502)
+            data = r.json()
+            status = data.get("data", {}).get("status", "")
+    except Exception as e:
+        return JSONResponse({"detail": f"销毁请求异常: {e}"}, status_code=502)
 
-    # === 轮询阶段（非动作）：静态代理 / 直连，避免 30 秒短效代理过期 ===
-    async with httpx.AsyncClient(proxy=_get_proxy_url(), timeout=30) as client:
-        # 3. 轮询等待状态（最多 60 秒）
-        status_url = f"{base}/open-apis/user/mimo-claw/status"
-        deadline = time.time() + 60
-        last_status = ""
-        while time.time() < deadline:
-            try:
-                sr = await client.get(status_url, cookies=cookies, headers=headers, timeout=10)
-                if sr.status_code == 401:
-                    return JSONResponse({"detail": "凭证已过期 (401)"}, status_code=401)
-                d = sr.json()
-                st = (d.get("data") or {}).get("status", "")
-                if st:
-                    last_status = st
-                if st == "AVAILABLE":
-                    # 创建成功后触发桥接注入：优先按 uid 做单账号定向重建，避免无差别打扰其他健康账号。
-                    # 仅当对应 manager 找不到（账号被禁用 / 任务已退出 / 罕见 race）时才 fallback 到全局。
-                    from .manager import trigger_rebuild, trigger_rebuild_for_uid
-                    if trigger_rebuild_for_uid(uid):
-                        scope_msg = "已触发该账号定向重建（仅本账号）"
-                    else:
-                        trigger_rebuild()
-                        scope_msg = "未找到对应 manager，已 fallback 触发全局重建"
-                    return JSONResponse({
-                        "status": "ok",
-                        "claw_status": "AVAILABLE",
-                        "message": f"环境创建成功，{scope_msg}",
-                    })
-                if st in ("FAILED", "CREATE_FAILED", "ERROR"):
-                    return JSONResponse({"detail": f"创建失败，状态: {st}"}, status_code=502)
-            except Exception:
-                pass
-            await asyncio.sleep(3)
-
-        return JSONResponse({"detail": f"创建超时，最后状态: {last_status}"}, status_code=504)
+    return JSONResponse({
+        "status": "ok",
+        "message": f"账号 {uid} 的 miclaw 容器已销毁",
+        "claw_status": status,
+    })
 
 
 @router.patch("/api/users/rename/{uid}")
@@ -495,9 +447,8 @@ async def api_users_delete(uid: str):
 
 @router.post("/api/users/disable/{uid}")
 async def api_users_disable(uid: str):
-    """手动禁用账号：标记禁用 + 触发销毁 mimo-claw"""
-    from urllib.parse import quote
-    from .manager import disable_account, is_account_disabled, load_disabled_accounts, make_claw_action_http_client
+    """手动禁用账号：标记禁用，不触发销毁 mimo-claw"""
+    from .manager import disable_account, is_account_disabled, load_disabled_accounts
 
     target_file = os.path.join(USERS_DIR, f"user_{uid}.json")
     if not os.path.exists(target_file):
@@ -512,51 +463,7 @@ async def api_users_disable(uid: str):
     # 标记为手动禁用（如果之前是自动禁用，会被覆盖为手动禁用）
     disable_account(uid, reason="WebUI 手动禁用", auto=False)
 
-    # 尝试销毁该账号的 mimo-claw 实例
-    try:
-        with open(target_file, "r", encoding="utf-8") as f:
-            user_data = json.load(f)
-        ph = user_data.get("xiaomichatbot_ph", "")
-        cookies = {
-            "serviceToken": user_data.get("serviceToken", ""),
-            "userId": user_data.get("userId", ""),
-            "xiaomichatbot_ph": ph,
-        }
-        headers = {
-            "Accept": "*/*",
-            "Content-Type": "application/json",
-            "Origin": "https://aistudio.xiaomimimo.com",
-            "Referer": "https://aistudio.xiaomimimo.com/",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        }
-        destroy_url = f"https://aistudio.xiaomimimo.com/open-apis/user/mimo-claw/destroy?xiaomichatbot_ph={quote(ph)}"
-        async with await make_claw_action_http_client(timeout=15) as client:
-            await client.post(destroy_url, cookies=cookies, headers=headers, timeout=15)
-    except Exception:
-        pass  # 销毁失败不影响禁用状态
-
-    # 让该账号的 run_lifecycle 尽快回到 while 顶部检查 disabled，
-    # 而不是等到下一次 sleep（最坏 55min）才感知到自己已被禁用。
-    # signal_rebuild() 通过 _account_managers 注册表精确唤醒该账号的 _rebuild_event，
-    # 任何挂在 _interruptible_sleep_dual 的协程都会立即返回；
-    # 即便此时该 task 正在 destroy/create/send_message 等阻塞调用中，
-    # 这些调用结束后下一次 sleep_dual 立刻被唤醒，也比纯靠时间轮转快得多。
-    try:
-        from .manager import _account_managers
-        mgr = _account_managers.get(str(uid))
-        if mgr is not None:
-            mgr.signal_rebuild()
-    except Exception:
-        pass
-
     # 主动从 gateway 侧关闭该 uid 对应的所有 WebSocket 连接。
-    # 禁用流程原先只依赖「容器销毁 → bridge 进程被杀 → TCP 断开 → gateway 回收」这条间接路径。
-    # 但如果 Claw 销毁 API 失败 / 延迟 / bridge 因 nohup 残留等原因未被立即杀掉，
-    # gateway 的 active_clients 里仍会保留该节点 → WebUI 节点面板显示"在线"（与禁用状态矛盾）。
-    # 这里补一刀：主动 close(4001) 该 uid 的所有 ws，确保节点面板立即反映禁用状态。
-    # 4001 是自定义 close code，bridge 收到后会停止重连循环（而非 3s 后再连回来）。
-    # ws.close() 后对应 ws_tunnel 的 finally 分支会自然回收所有关联状态（cooldown / uid_map 等）。
-
     # 先撤销该 uid 的所有会话注册码 → 即使 close 失败，bridge 重连也会被 gateway 拒绝
     revoked = _revoke_sessions_for_uid(uid)
 
@@ -570,11 +477,11 @@ async def api_users_disable(uid: str):
             await ws.close(code=4001)  # 4001 = 账号已禁用，bridge 收到后停止重连
             evicted_count += 1
         except Exception:
-            pass  # close 失败无妨，finally 仍会回收
+            pass
 
     return JSONResponse({
         "status": "ok",
-        "message": f"账号 {uid} 已禁用，Claw 实例已触发销毁",
+        "message": f"账号 {uid} 已禁用（不触发容器销毁）",
         "evicted_ws_nodes": evicted_count,
         "revoked_sessions": revoked,
     })

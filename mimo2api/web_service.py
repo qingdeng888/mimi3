@@ -27,7 +27,7 @@ except ImportError:
 MODEL_MAPPING_FILE = Path(__file__).parent.parent / "model_mapping.json"
 
 # 引入 Manager 长驻协程任务
-from .manager import start_manager_tasks, trigger_rebuild, trigger_rebuild_for_uid
+from .manager import start_manager_tasks
 
 # Responses API 转换器
 from .responses_converter import convert_request as responses_convert_request
@@ -257,8 +257,8 @@ STREAM_KEEPALIVE_INTERVAL = 25  # 秒，需小于 Cloudflare 超时 (~100s)
 QUEUE_DRAIN_TIMEOUT = 5
 DEFAULT_GATEWAY_ERROR = "Gateway Error: 所有节点请求失败"
 NODE_401_COOLDOWN_SECONDS = int(os.getenv("MIMO_NODE_401_COOLDOWN_SECONDS", "30"))
-# 同一节点累计冷却达到该阈值时，判定为坏号并自动调用 trigger_rebuild() 触发全局重建；
-# 设为 0 表示关闭该自动重建特性（仅冷却，不再升级到重建）。
+# 同一节点累计冷却达到该阈值时，判定为坏号并主动断开该节点（不再触发重建）；
+# 设为 0 表示关闭该自动断开特性（仅冷却，不断开）。
 NODE_COOLDOWN_REBUILD_THRESHOLD = int(os.getenv("MIMO_NODE_COOLDOWN_REBUILD_THRESHOLD", "3"))
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PROCESS_LOCK_PATH = os.getenv("MIMO_PROCESS_LOCK_PATH", os.path.join(ROOT_DIR, "mimo2api.lock"))
@@ -344,11 +344,6 @@ class ForwardAttempt:
     target_ws: WebSocket
     first_msg: dict[str, Any]
     attempt_number: int
-
-@app.post("/api/rebuild")
-async def api_rebuild():
-    trigger_rebuild()
-    return JSONResponse(content={"ok": True, "message": "重建信号已发送，所有节点将在当前循环结束后立即重建"})
 
 @app.get("/api/stats")
 async def api_stats():
@@ -589,29 +584,11 @@ def cooldown_client(ws: WebSocket, seconds: int, reason: str) -> None:
 
     threshold = NODE_COOLDOWN_REBUILD_THRESHOLD
     if threshold > 0 and count >= threshold:
-        # 优先按 uid 做单账号定向重建（节省其他健康账号），
-        # 只有在拿不到 uid 或对应 AccountManager 已不存在时
-        # 才 fallback 到全局 trigger_rebuild()。
-        bridge_uid = state.client_uid_map.get(id(ws), "")
-        scope_label = "未知"
-        if bridge_uid and trigger_rebuild_for_uid(bridge_uid):
-            scope_label = f"单账号定向重建 (uid={bridge_uid})"
-        else:
-            try:
-                trigger_rebuild()
-            except Exception as e:
-                logger.warning(f"调用 trigger_rebuild() 失败: {e}")
-            scope_label = (
-                f"全局重建 (uid 缺失/无对应 manager；bridge_uid={bridge_uid or '空'})"
-            )
-
+        # 累计冷却次数达到阈值，判定为坏号，主动断开该节点（不触发重建）
         logger.error(
             f"🔥 节点 {node_label(ws)} 因 {reason} 累计冷却第 {count} 次（阈值 {threshold}），"
-            f"判定为坏号 → 主动断开该节点并触发{scope_label}。"
+            f"判定为坏号 → 主动断开该节点。"
         )
-        # 主动断开该 WS：finally 段会清理 active_clients / cooldown / 计数器 / uid_map
-        # _track_task：用全局集合持有 task 引用，避免 Py 3.11+ 出现 "Task was destroyed but it is pending"
-        # 警告（fire-and-forget 任务必须有外部强引用，否则可能被 GC 中途取消，close 帧来不及发出）。
         try:
             _track_task(asyncio.create_task(ws.close(code=1000)))
         except Exception:
