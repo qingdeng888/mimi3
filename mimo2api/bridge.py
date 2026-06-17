@@ -1,8 +1,7 @@
 import asyncio, websockets, httpx, json, os, urllib.parse
 
 KEY = os.getenv("MIMO_API_KEY")
-URL = os.getenv("MIMO_API_BASE_URL")
-BASE = URL.split("/v1/")[0] if "/v1/" in URL else URL
+BASE_URL = os.getenv("MIMO_API_BASE_URL", "").rstrip("/")
 WS_URL = "__WS_URL__"
 
 # 桥接归属账号 uid 占位符；manager.py 会用 json.dumps(uid) 整体替换下面 BRIDGE_UID 赋值那一行
@@ -44,16 +43,28 @@ async def safe_send(ws, lock, data):
         await ws.send(json.dumps(data))
 
 async def handle_request(ws, req, client, lock):
-    req_id = req.get("req_id") 
+    req_id = req.get("req_id")
+    path = req.get("path", "/v1/chat/completions")
+    # 拼接完整的转发 URL：base + path
+    target_url = f"{BASE_URL}{path}" if path.startswith("/") else f"{BASE_URL}/{path}"
+
+    # 透传请求原始 headers（如有），补充 api-key 和 Content-Type
+    req_headers = req.get("headers", {}) or {}
+    forward_headers = {k: v for k, v in req_headers.items() if k.lower() not in ("host", "content-length", "transfer-encoding")}
+    forward_headers.setdefault("Content-Type", "application/json")
+    if KEY:
+        forward_headers["Authorization"] = f"Bearer {KEY}"
+        forward_headers["api-key"] = KEY
+
     try:
         async with client.stream(
-            method=req.get("method", "GET"), 
-            url=f"{BASE}/anthropic/v1/messages" if "/anthropic/" in req.get("path", "") else URL, 
-            headers={"api-key": KEY, "Content-Type": "application/json"}, 
+            method=req.get("method", "POST"),
+            url=target_url,
+            headers=forward_headers,
             content=req.get("body", "")
         ) as r:
             await safe_send(ws, lock, {
-                "req_id": req_id, "type": "start", 
+                "req_id": req_id, "type": "start",
                 "status": r.status_code, "headers": dict(r.headers)
             })
             async for chunk in r.aiter_text():
@@ -62,7 +73,7 @@ async def handle_request(ws, req, client, lock):
                         "req_id": req_id, "type": "chunk", "body": chunk
                     })
             await safe_send(ws, lock, {"req_id": req_id, "type": "finish"})
-            
+
     except Exception as e:
         await safe_send(ws, lock, {"req_id": req_id, "type": "error", "body": str(e)})
 

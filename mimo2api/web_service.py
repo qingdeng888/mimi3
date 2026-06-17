@@ -614,10 +614,13 @@ async def drain_and_close(req_id: str, queue: asyncio.Queue) -> None:
 def should_retry_status(status_code: int) -> bool:
     return status_code in RETRYABLE_STATUS_CODES or status_code >= 500
 
-def build_ws_payload(req_id: str, method: str, path: str, body: str) -> str:
-    return json.dumps({"req_id": req_id, "method": method, "path": path, "body": body})
+def build_ws_payload(req_id: str, method: str, path: str, body: str, headers: dict | None = None) -> str:
+    payload = {"req_id": req_id, "method": method, "path": path, "body": body}
+    if headers:
+        payload["headers"] = headers
+    return json.dumps(payload)
 
-async def dispatch_to_node(*, method: str, path: str, body: str, log_label: str, attempt_number: int) -> ForwardAttempt | None:
+async def dispatch_to_node(*, method: str, path: str, body: str, headers: dict | None = None, log_label: str, attempt_number: int) -> ForwardAttempt | None:
     try:
         req_id, queue = create_pending_request()
     except RuntimeError:
@@ -633,7 +636,7 @@ async def dispatch_to_node(*, method: str, path: str, body: str, log_label: str,
     state.req_id_to_ws_id[req_id] = id(target_ws)
     state.ws_to_req_ids.setdefault(id(target_ws), set()).add(req_id)
 
-    ws_payload = build_ws_payload(req_id, method, path, body)
+    ws_payload = build_ws_payload(req_id, method, path, body, headers=headers)
     attempt_started_at = time.monotonic()
     record_attempt_started(target_ws)
 
@@ -664,8 +667,8 @@ async def dispatch_to_node(*, method: str, path: str, body: str, log_label: str,
     return ForwardAttempt(req_id=req_id, queue=queue, target_ws=target_ws, first_msg=first_msg, attempt_number=attempt_number)
 
 
-async def prepare_forward_attempt(*, method: str, path: str, body: str, log_label: str, retry_state: RetryState, attempt_number: int) -> ForwardAttempt | None:
-    attempt = await dispatch_to_node(method=method, path=path, body=body, log_label=log_label, attempt_number=attempt_number)
+async def prepare_forward_attempt(*, method: str, path: str, body: str, headers: dict | None = None, log_label: str, retry_state: RetryState, attempt_number: int) -> ForwardAttempt | None:
+    attempt = await dispatch_to_node(method=method, path=path, body=body, headers=headers, log_label=log_label, attempt_number=attempt_number)
     if attempt is None:
         return None
 
@@ -1005,7 +1008,7 @@ async def _forward_request(request: Request, path: str):
     for attempt in range(max_retries):
         req_id = "unknown"
         try:
-            prepared = await prepare_forward_attempt(method=method, path=path, body=body_text, log_label="转发请求", retry_state=retry_state, attempt_number=attempt + 1)
+            prepared = await prepare_forward_attempt(method=method, path=path, body=body_text, headers=dict(request.headers), log_label="转发请求", retry_state=retry_state, attempt_number=attempt + 1)
             if prepared is None:
                 continue
             req_id = prepared.req_id
