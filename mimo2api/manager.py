@@ -935,10 +935,10 @@ class AccountManager:
                         self.logger.warning(f"⚠️ 锁内等待创建条件满足超时（{_lock_wait_timeout}s），释放锁回到外层重新等待。")
                         continue
 
-                    # ------ 路径 A：尝试复用可用容器 ------
+                    # ------ 路径 A：检测到已有可用容器，直接注入脚本 ------
                     reuse_success = False
-                    if st == "AVAILABLE" and remain_sec > 180:
-                        self.logger.info(f"发现可用宿主环境！尝试直接免重启挂载接入...")
+                    if st == "AVAILABLE":
+                        self.logger.info(f"✅ 检测到已有可用 miclaw 容器（剩余 {remain_sec} 秒），跳过创建，直接注入脚本...")
                         if await self.connect_with_retry(client, max_retries=3, create=False):
                             bridge_code = await get_bridge_code(self.uid)
                             inject_prompt = (
@@ -963,13 +963,13 @@ class AccountManager:
                             reuse_success = True
                         else:
                             await client.close()
-                            self.logger.warning("虽然状态显示 AVAILABLE，但免重建重连失败！继续走全量摧毁新建流程...")
+                            self.logger.warning("容器状态为 AVAILABLE 但 WebSocket 连接失败，尝试走全量创建流程...")
                             client = NativeClawClient(self.ph, self.cookies, self.logger)
 
                     # ------ 路径 B：全量创建（复用失败或状态非 AVAILABLE）------
                     if not reuse_success:
-                        # 1. 清理残余非健康实例（仅非 DESTROYED/NOT_CREATED 才需要清理）
-                        if st not in ("DESTROYED", "NOT_CREATED", ""):
+                        # 1. 清理残余非健康实例（AVAILABLE/DESTROYED/NOT_CREATED 都不需要清理）
+                        if st not in ("DESTROYED", "NOT_CREATED", "", "AVAILABLE"):
                             self.logger.info("准备清理残余不健康的 Claw 实例...")
                             await client.destroy_claw()
                             await asyncio.sleep(3)
