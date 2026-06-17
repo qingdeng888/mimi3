@@ -1,6 +1,6 @@
 import asyncio, websockets, httpx, json, os, urllib.parse
 
-KEY = os.getenv("MIMO_API_KEY")
+KEY = os.getenv("MIMO_API_KEY", "")
 BASE_URL = os.getenv("MIMO_API_BASE_URL", "").rstrip("/")
 WS_URL = "__WS_URL__"
 
@@ -45,20 +45,19 @@ async def safe_send(ws, lock, data):
 async def handle_request(ws, req, client, lock):
     req_id = req.get("req_id")
     path = req.get("path", "/v1/chat/completions")
-    # 拼接完整的转发 URL：base + path
     target_url = f"{BASE_URL}{path}" if path.startswith("/") else f"{BASE_URL}/{path}"
 
-    # 使用 miclaw 容器本身的凭证和设备信息伪装 headers
+    # 使用 miclaw 容器本身的 headers 伪装
     forward_headers = {
         "Content-Type": "application/json",
         "Accept": "*/*",
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
         "Origin": "https://aistudio.xiaomimimo.com",
         "Referer": "https://aistudio.xiaomimimo.com/",
+        "x-timezone": "Asia/Shanghai",
     }
     if KEY:
         forward_headers["Authorization"] = f"Bearer {KEY}"
-        forward_headers["api-key"] = KEY
 
     try:
         async with client.stream(
