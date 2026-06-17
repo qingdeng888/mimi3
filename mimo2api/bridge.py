@@ -48,10 +48,14 @@ async def handle_request(ws, req, client, lock):
     # 拼接完整的转发 URL：base + path
     target_url = f"{BASE_URL}{path}" if path.startswith("/") else f"{BASE_URL}/{path}"
 
-    # 透传请求原始 headers（如有），补充 api-key 和 Content-Type
-    req_headers = req.get("headers", {}) or {}
-    forward_headers = {k: v for k, v in req_headers.items() if k.lower() not in ("host", "content-length", "transfer-encoding")}
-    forward_headers.setdefault("Content-Type", "application/json")
+    # 使用 miclaw 容器本身的凭证和设备信息伪装 headers
+    forward_headers = {
+        "Content-Type": "application/json",
+        "Accept": "*/*",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
+        "Origin": "https://aistudio.xiaomimimo.com",
+        "Referer": "https://aistudio.xiaomimimo.com/",
+    }
     if KEY:
         forward_headers["Authorization"] = f"Bearer {KEY}"
         forward_headers["api-key"] = KEY
