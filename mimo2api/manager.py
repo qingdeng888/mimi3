@@ -688,7 +688,7 @@ class NativeClawClient:
             self.logger.error(f"获取 Ticket 失败: {e}")
             return False
 
-        cookie_str = "; ".join(f'{k}="{v}"' if ' ' in v or '=' in v else f'{k}={v}' for k, v in self.cookies.items())
+        cookie_str = "; ".join(f'{k}={v}' for k, v in self.cookies.items())
         headers_dict = {"Cookie": cookie_str, "Origin": BASE_URL}
 
         try:
@@ -713,11 +713,12 @@ class NativeClawClient:
         self.connected = False
         self._listen_task = asyncio.create_task(self._ws_loop())
         
-        # 等待后台 loop 处理 hello-ok 完成鉴权挂载
-        for _ in range(50):
+        # 等待后台 loop 处理 hello-ok 完成鉴权挂载（最多 15 秒）
+        for _ in range(150):
             if self.connected: 
                 return True
             await asyncio.sleep(0.1)
+        self.logger.error("WebSocket 握手超时（15秒内未收到 hello-ok）")
         return False
         
     async def _ws_loop(self):
@@ -740,13 +741,19 @@ class NativeClawClient:
                     self.responses[data["id"]] = data
                     if data.get("ok") and data.get("payload", {}).get("type") == "hello-ok":
                         self.connected = True
+                    elif not data.get("ok"):
+                        self.logger.warning(f"WS 响应失败: {json.dumps(data, ensure_ascii=False)[:200]}")
                 elif data["type"] == "event":
                     self.events.append(data)
-        except Exception:
+        except websockets.exceptions.ConnectionClosed as e:
+            self.logger.warning(f"WebSocket 连接被关闭: code={e.code}, reason={e.reason}")
+            self.connected = False
+        except Exception as e:
+            self.logger.warning(f"WebSocket 监听异常: {e}")
             self.connected = False
 
     async def send_message(self, text: str, timeout: int = 120) -> str:
-        """向 Claw 环境发生信息，并捕获最终确定的 AI 文本回复框"""
+        """向 Claw 环境发送信息，并捕获最终确定的 AI 文本回复"""
         if not self.connected or not self.ws:
             return "(发送失败，Websocket 未连接)"
             
@@ -760,11 +767,15 @@ class NativeClawClient:
         try:
             await self.ws.send(json.dumps(payload))
         except Exception as e:
+            self.connected = False
             return f"(下发 payload 异常: {e})"
 
         reply = None
         for _ in range(timeout * 10):
-            for evt in list(self.events): # 复制一份遍历避免动态更改引发异常
+            # 检查连接是否已断开
+            if not self.connected:
+                return reply or "(WebSocket 连接已断开，未收到完整回复)"
+            for evt in list(self.events):
                 if evt.get("event") == "chat":
                     msg = evt.get("payload", {}).get("message", {})
                     if msg.get("role") == "assistant":
