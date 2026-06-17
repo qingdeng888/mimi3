@@ -32,9 +32,9 @@ if __name__ == "__main__":
     log_file = os.path.join(log_dir, "gateway.log")
 
     root_logger = logging.getLogger()
-    root_logger.setLevel(logging.INFO)
+    root_logger.setLevel(logging.DEBUG)
 
-    fmt = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+    fmt = logging.Formatter("%(asctime)s - [%(name)s] - %(levelname)s - %(message)s")
 
     # journal（stdout）
     sh = logging.StreamHandler()
@@ -45,6 +45,14 @@ if __name__ == "__main__":
     fh = RotatingFileHandler(log_file, maxBytes=10*1024*1024, backupCount=5, encoding="utf-8")
     fh.setFormatter(fmt)
     root_logger.addHandler(fh)
+
+    # 关键模块日志级别设为 DEBUG
+    logging.getLogger("Manager").setLevel(logging.DEBUG)
+    logging.getLogger("httpx").setLevel(logging.DEBUG)
+    logging.getLogger("httpcore").setLevel(logging.DEBUG)
+    logging.getLogger("websockets").setLevel(logging.DEBUG)
+    # uvicorn 访问日志保持 INFO 避免刷屏
+    logging.getLogger("uvicorn.access").setLevel(logging.INFO)
 
     logging.info(f"🚀 mimo2api 统一主入口 - 正在启动网关并绑定集群到 {SERVER_HOST}:{SERVER_PORT}")
     logging.info(f"🔗 云端要求 Claw 主动连接的桥接 WS URL 将统一下发为: {WS_TUNNEL_URL}")

@@ -25,9 +25,12 @@ import websockets
 _account_managers: dict[str, "AccountManager"] = {}
 
 # 配置日志格式
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - [%(name)s] - %(levelname)s - %(message)s")
+logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - [%(name)s] - %(levelname)s - %(message)s")
 logger = logging.getLogger("Manager")
-logging.getLogger("httpx").setLevel(logging.WARNING)
+logger.setLevel(logging.DEBUG)
+logging.getLogger("httpx").setLevel(logging.DEBUG)
+logging.getLogger("httpcore").setLevel(logging.DEBUG)
+logging.getLogger("websockets").setLevel(logging.DEBUG)
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BASE_URL = "https://aistudio.xiaomimimo.com"
@@ -684,28 +687,33 @@ class NativeClawClient:
 
         try:
             ticket = await self._get_ticket()
+            self.logger.debug(f"获取到 Ticket: {ticket[:8]}...")
         except Exception as e:
             self.logger.error(f"获取 Ticket 失败: {e}")
             return False
 
         cookie_str = "; ".join(f'{k}={v}' for k, v in self.cookies.items())
         headers_dict = {"Cookie": cookie_str, "Origin": BASE_URL}
+        ws_url = f"{WS_URL}?ticket={ticket}"
+        self.logger.debug(f"正在连接 WebSocket: {ws_url[:60]}...")
+        self.logger.debug(f"Cookie: {cookie_str[:80]}...")
 
         try:
             # 兼容 python websockets >= 14.0
             try:
                 self.ws = await websockets.connect(
-                    f"{WS_URL}?ticket={ticket}",
+                    ws_url,
                     additional_headers=headers_dict
                 )
             except TypeError as e:
                 if "additional_headers" in str(e):
                     self.ws = await websockets.connect(
-                        f"{WS_URL}?ticket={ticket}",
+                        ws_url,
                         extra_headers=headers_dict
                     )
                 else:
                     raise
+            self.logger.debug("WebSocket TCP 连接已建立，等待协议握手...")
         except Exception as e:
             self.logger.error(f"WebSocket 连结失败: {e}")
             return False
@@ -725,7 +733,9 @@ class NativeClawClient:
         try:
             async for message in self.ws:
                 data = json.loads(message)
+                self.logger.debug(f"WS 收到: type={data.get('type')}, event={data.get('event', '-')}, id={data.get('id', '-')}")
                 if data["type"] == "event" and data.get("event") == "connect.challenge":
+                    self.logger.debug("收到 connect.challenge，发送 connect 请求...")
                     await self.ws.send(json.dumps({
                         "type": "req", "id": str(uuid.uuid4()), "method": "connect",
                         "params": {
@@ -764,8 +774,10 @@ class NativeClawClient:
             "params": {"sessionKey": self.session_key, "message": text, "idempotencyKey": str(uuid.uuid4())}
         }
         
+        self.logger.debug(f"发送 chat.send: id={req_id}, 消息长度={len(text)}")
         try:
             await self.ws.send(json.dumps(payload))
+            self.logger.debug("chat.send payload 已发送，等待回复...")
         except Exception as e:
             self.connected = False
             return f"(下发 payload 异常: {e})"
