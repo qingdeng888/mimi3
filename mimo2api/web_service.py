@@ -655,6 +655,15 @@ async def dispatch_to_node(*, method: str, path: str, body: str, log_label: str,
         record_attempt_finished(target_ws=target_ws, status_code=504, first_byte_latency_ms=(time.monotonic() - attempt_started_at) * 1000, success=False)
         raise
 
+    # 打印 bridge 返回的首条响应信息
+    logger.debug(
+        f"📨 [{req_id[:8]}] bridge 首条响应: type={first_msg.get('type')}, "
+        f"status={first_msg.get('status', '-')}, "
+        f"headers={json.dumps(dict(list(first_msg.get('headers', {}).items())[:5]), ensure_ascii=False)[:200] if first_msg.get('headers') else '-'}"
+    )
+    if first_msg.get("type") == "error":
+        logger.warning(f"❌ [{req_id[:8]}] bridge 返回错误: {first_msg.get('body', '')[:500]}")
+
     record_attempt_finished(
         target_ws=target_ws,
         status_code=int(first_msg.get("status", 200)),
@@ -1012,6 +1021,7 @@ async def _forward_request(request: Request, path: str):
             queue = prepared.queue
             first_msg = prepared.first_msg
             status_code = first_msg.get("status", 200)
+            logger.debug(f"📩 [{req_id[:8]}] 响应 status={status_code}, path={path}")
             first_byte_at = time.monotonic()
             content_type, response_headers = normalize_response_headers(first_msg.get("headers", {}))
 
@@ -1064,7 +1074,20 @@ async def _forward_request(request: Request, path: str):
                     record_request_finished(route_key=route_key, status_code=status_code if stream_succeeded else 502, started_at=request_started_at, first_byte_at=first_byte_at, success=stream_succeeded and status_code < 400, usage=usage_data, api_key_id=api_key_id)
 
             if status_code >= 400:
-                record_error(route_key, status_code, f"上游返回 {status_code}", detail=first_msg.get("body", "")[:300])
+                # 非流式错误响应：读取第一个 chunk 打印出来方便调试
+                error_body_parts = []
+                try:
+                    while not queue.empty():
+                        msg = queue.get_nowait()
+                        if msg.get("type") == "chunk":
+                            error_body_parts.append(msg.get("body", ""))
+                        elif msg.get("type") in ("finish", "error"):
+                            break
+                except Exception:
+                    pass
+                error_body = "".join(error_body_parts)
+                logger.warning(f"❌ [{req_id[:8]}] 上游返回 {status_code}: {error_body[:500]}")
+                record_error(route_key, status_code, f"上游返回 {status_code}", detail=(error_body or first_msg.get("body", ""))[:300])
 
             return StreamingResponse(stream_generator(req_id, queue, use_keepalive=is_streaming), status_code=status_code, media_type=content_type, headers=response_headers)
 
