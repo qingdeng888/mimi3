@@ -45,7 +45,13 @@ async def safe_send(ws, lock, data):
 async def handle_request(ws, req, client, lock):
     req_id = req.get("req_id")
     path = req.get("path", "/v1/chat/completions")
-    target_url = f"{BASE_URL}{path}" if path.startswith("/") else f"{BASE_URL}/{path}"
+    # 拼接完整的转发 URL，确保不会出现双斜杠或重复 /v1
+    base = BASE_URL.rstrip("/")
+    path = path if path.startswith("/") else f"/{path}"
+    # 如果 BASE_URL 已经包含 /v1 而 path 也以 /v1 开头，去掉重复
+    if base.endswith("/v1") and path.startswith("/v1"):
+        path = path[3:]  # 去掉 path 开头的 /v1
+    target_url = f"{base}{path}"
 
     # 使用 miclaw 容器本身的 headers 伪装
     forward_headers = {
