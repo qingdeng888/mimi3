@@ -715,6 +715,7 @@
                             </td>
                             <td>
                                 ${disableBtn}
+                                <button class="btn" style="background:#2563EB; margin-right:6px; font-size:12px; padding:6px 12px;" onclick="injectBridge('${u.userId}')" ${isDisabled ? 'disabled title="请先启用"' : ''}>重新注入</button>
                                 <button class="btn btn-danger" onclick="destroyClaw('${u.userId}')" style="margin-right:6px; font-size:12px; padding:6px 12px;" ${isDisabled ? 'disabled title="请先启用"' : ''}>销毁miclaw</button>
                                 <button class="btn btn-danger" onclick="deleteUser('${u.userId}')" style="font-size:12px; padding:6px 12px;">删除</button>
                             </td>
@@ -819,6 +820,25 @@
                 if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
                 if (e.key === 'Escape') { input.value = currentName; input.blur(); }
             });
+        }
+
+        async function injectBridge(uid) {
+            if(!confirm(`确定要对账号 ${uid} 重新注入 bridge 脚本吗？\n将直接连接当前容器并注入（不创建新容器）。`)) return;
+            showToast(`正在为 ${uid} 重新注入脚本，请稍候...`);
+            try {
+                const res = await apiFetch(`/api/users/inject/${uid}`, {method: 'POST'});
+                const data = await res.json();
+                if(res.ok) {
+                    showToast(`${uid} 脚本注入成功！`);
+                    fetchUsers();
+                } else {
+                    showToast(`注入失败: ${data.detail || '未知错误'}`, 'error');
+                }
+            } catch(e) {
+                if (e.message !== 'UNAUTHORIZED') {
+                    showToast('注入请求异常: ' + e.message, 'error');
+                }
+            }
         }
 
         async function destroyClaw(uid) {

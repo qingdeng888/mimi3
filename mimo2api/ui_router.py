@@ -393,6 +393,33 @@ async def api_users_destroy(uid: str):
     })
 
 
+@router.post("/api/users/inject/{uid}")
+async def api_users_inject(uid: str):
+    """手动触发重新注入 bridge 脚本（不创建容器、不重置环境，直连注入）"""
+    from .manager import _account_managers, AccountManager, load_all_users
+
+    target_file = os.path.join(USERS_DIR, f"user_{uid}.json")
+    if not os.path.exists(target_file):
+        return JSONResponse({"detail": "User not found"}, status_code=404)
+
+    # 优先使用已注册的 manager
+    mgr = _account_managers.get(str(uid))
+    if mgr is None:
+        # 没有活跃的 manager，临时创建一个来执行注入
+        try:
+            with open(target_file, "r", encoding="utf-8") as f:
+                user_data = json.load(f)
+        except Exception as e:
+            return JSONResponse({"detail": f"读取账号文件失败: {e}"}, status_code=500)
+        mgr = AccountManager(uid, user_data)
+
+    success, message = await mgr.inject_bridge_only()
+    if success:
+        return JSONResponse({"status": "ok", "message": message})
+    else:
+        return JSONResponse({"detail": message}, status_code=502)
+
+
 @router.patch("/api/users/rename/{uid}")
 async def api_users_rename(uid: str, request: Request):
     """修改账号备注名（仅更新 name 字段，不影响凭证与生命周期）"""
