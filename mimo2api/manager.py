@@ -582,6 +582,7 @@ class NativeClawClient:
     async def _create_and_wait(self) -> bool:
         """创建 Claw 实例并等待其可用
 
+        流程：协议签署 → 创建实例 → 轮询状态直到 AVAILABLE。
         agreement / create POST 使用「携趣短效代理」（≈30 秒有效，正好够这两个请求）；
         随后的状态轮询（最长 120 秒）使用静态代理 / 直连，避免在轮询过程中短效代理失效。
         """
@@ -591,15 +592,39 @@ class NativeClawClient:
 
         # Step 1：协议签署 + 创建容器（动作）→ 携趣短效代理一次性完成
         async with await make_claw_action_http_client(timeout=30) as client:
+            # 1a. 签署免责协议（幂等，即使已签署也无副作用）
             try:
-                await client.post(url_agree, cookies=self.cookies, headers=_aistudio_headers(), timeout=15)
-            except Exception:
-                pass
+                agree_r = await client.post(url_agree, cookies=self.cookies, headers=_aistudio_headers(), timeout=15)
+                self.logger.info(f"协议签署响应: HTTP {agree_r.status_code}")
+            except Exception as e:
+                self.logger.warning(f"协议签署请求异常（不阻塞创建）: {e}")
 
-            r = await client.post(url_create, cookies=self.cookies, headers=_aistudio_headers(), timeout=20)
+            # 1b. 创建实例
+            try:
+                r = await client.post(url_create, cookies=self.cookies, headers=_aistudio_headers(), timeout=20)
+            except Exception as e:
+                self.logger.error(f"创建请求网络异常: {e}")
+                return False
+
             if r.status_code == 401:
                 self.logger.error("账户已过期失效 (Create 401)")
                 return False
+
+            # 检查响应 body 的业务状态码
+            try:
+                create_data = r.json()
+                code = create_data.get("code")
+                msg = create_data.get("msg", "")
+                data_obj = create_data.get("data") or {}
+                create_status = data_obj.get("status", "")
+                self.logger.info(f"创建响应: code={code}, msg={msg}, status={create_status}")
+
+                if code != 0:
+                    self.logger.error(f"创建失败（业务错误码 {code}）: {msg}")
+                    return False
+            except Exception as e:
+                self.logger.warning(f"解析创建响应异常: {e}，继续轮询状态...")
+
         # 携趣短效代理在此 with 块结束时已自然关闭/丢弃
 
         # Step 2：状态轮询（非动作）→ 静态代理或直连
@@ -607,8 +632,15 @@ class NativeClawClient:
             deadline = time.time() + 120
             last_status = None
             while time.time() < deadline:
-                sr = await client.get(url_status, cookies=self.cookies, headers=_aistudio_headers(), timeout=15)
+                try:
+                    sr = await client.get(url_status, cookies=self.cookies, headers=_aistudio_headers(), timeout=15)
+                except Exception as e:
+                    self.logger.warning(f"状态轮询请求异常: {e}")
+                    await asyncio.sleep(3)
+                    continue
+
                 if sr.status_code == 401:
+                    self.logger.error("状态查询返回 401，凭证已失效")
                     return False
                 try:
                     d = sr.json()
@@ -618,12 +650,13 @@ class NativeClawClient:
                         last_status = st
                     if st == "AVAILABLE":
                         return True
-                    if st in ("FAILED", "DESTROYED", "ERROR"):
+                    if st in ("FAILED", "DESTROYED", "ERROR", "CREATE_FAILED"):
                         self.logger.error(f"创建失败，状态进入: {st}")
                         return False
                 except Exception:
                     pass
-                await asyncio.sleep(2)
+                await asyncio.sleep(3)
+        self.logger.error("创建超时（120秒内未变为 AVAILABLE）")
         return False
 
     async def _get_ticket(self) -> str:
