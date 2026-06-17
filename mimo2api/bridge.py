@@ -1,7 +1,7 @@
 import asyncio, websockets, httpx, json, os, urllib.parse
 
 KEY = os.getenv("MIMO_API_KEY")
-URL = os.getenv("MIMO_API_ENDPOINT")
+URL = os.getenv("MIMO_API_BASE_URL")
 BASE = URL.split("/v1/")[0] if "/v1/" in URL else URL
 WS_URL = "__WS_URL__"
 
