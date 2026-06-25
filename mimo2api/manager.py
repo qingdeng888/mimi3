@@ -71,7 +71,7 @@ def get_active_node_count() -> int:
 
 
 # 允许创建的条件：节点为 1 时，该节点需在线超过此时间才放行
-_NODE_ONLINE_MIN_MINUTES_BEFORE_CREATE = 45
+_NODE_ONLINE_MIN_MINUTES_BEFORE_CREATE = 225  # 3小时45分钟
 
 
 def is_creation_allowed() -> tuple[bool, str]:
