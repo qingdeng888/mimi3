@@ -841,7 +841,7 @@ async def responses_handler(request: Request):
         is_streaming = True
         chat_req["stream"] = True
 
-    chat_body_text = json.dumps(chat_req, ensure_ascii=False)
+    chat_body_text = apply_model_mapping(json.dumps(chat_req, ensure_ascii=False))
     max_retries = min(MAX_RETRIES, get_available_client_count())
     if max_retries == 0:
         return Response("Gateway Error: 没有可用的内网节点", status_code=503)
