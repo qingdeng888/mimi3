@@ -33,6 +33,12 @@ from .manager import start_manager_tasks
 from .responses_converter import convert_request as responses_convert_request
 from .responses_converter import convert_response as responses_convert_response
 from .responses_converter import ResponsesStreamConverter
+# Anthropic Messages API 转换器
+from .anthropic_converter import (
+    convert_anthropic_request,
+    convert_openai_response as anthropic_convert_response,
+    AnthropicStreamConverter,
+)
 from .audio_helpers import (
     AudioSpeechRequest,
     audio_media_type,
@@ -985,7 +991,171 @@ async def chat_completions_handler(request: Request):
 
 @app.post("/anthropic/v1/messages")
 async def anthropic_messages_handler(request: Request):
-    return await _forward_request(request, "/anthropic/v1/messages")
+    """Anthropic Messages API 兼容端点 —— 将 Anthropic 格式转为 OpenAI 格式转发，再将响应转回 Anthropic 格式。"""
+    if not state.active_clients:
+        return JSONResponse(
+            {"type": "error", "error": {"type": "overloaded_error", "message": "没有可用的内网节点"}},
+            status_code=529,
+        )
+
+    body = await request.body()
+    try:
+        req_body = json.loads(body.decode("utf-8", "ignore").lstrip("\ufeff"))
+        chat_req = convert_anthropic_request(req_body)
+    except Exception as exc:
+        record_error("/anthropic/v1/messages", 400, f"请求解析/转换失败: {exc}")
+        return JSONResponse(
+            {"type": "error", "error": {"type": "invalid_request_error", "message": f"请求解析失败: {exc}"}},
+            status_code=400,
+        )
+
+    model = req_body.get("model", chat_req.get("model", ""))
+    is_streaming = chat_req.get("stream", False) is True
+
+    chat_body_text = apply_model_mapping(json.dumps(chat_req, ensure_ascii=False))
+    max_retries = min(MAX_RETRIES, get_available_client_count())
+    if max_retries == 0:
+        return JSONResponse(
+            {"type": "error", "error": {"type": "overloaded_error", "message": "没有可用的内网节点"}},
+            status_code=529,
+        )
+
+    retry_state = RetryState()
+    route_key = "/anthropic/v1/messages"
+    request_started_at = time.monotonic()
+    api_key_id = getattr(request.state, "api_key_id", None)
+    record_request_started(route_key, is_streaming=is_streaming, api_key_id=api_key_id)
+
+    for attempt in range(max_retries):
+        req_id = "unknown"
+        try:
+            prepared = await prepare_forward_attempt(
+                method="POST", path="/v1/chat/completions", body=chat_body_text,
+                log_label="Anthropic 映射请求", retry_state=retry_state, attempt_number=attempt + 1,
+            )
+            if prepared is None:
+                continue
+            req_id = prepared.req_id
+            queue = prepared.queue
+            first_msg = prepared.first_msg
+            status_code = first_msg.get("status", 200)
+            first_byte_at = time.monotonic()
+
+            if status_code >= 400:
+                content_type, response_headers = normalize_response_headers(first_msg.get("headers", {}))
+                raw_body = await collect_response_body(req_id, queue)
+                record_error("/anthropic/v1/messages", status_code, f"上游返回 {status_code}", detail=raw_body[:500])
+                record_request_finished(
+                    route_key=route_key, status_code=status_code,
+                    started_at=request_started_at, first_byte_at=first_byte_at,
+                    success=False, api_key_id=api_key_id,
+                )
+                # 将上游错误包装为 Anthropic 错误格式
+                return JSONResponse(
+                    {"type": "error", "error": {"type": "api_error", "message": raw_body[:1000]}},
+                    status_code=status_code,
+                )
+
+            if is_streaming:
+                converter = AnthropicStreamConverter(model=model)
+
+                async def anthropic_stream_generator(current_req_id, current_queue):
+                    last_data_time = time.monotonic()
+                    stream_succeeded = False
+                    data_task = asyncio.ensure_future(current_queue.get())
+
+                    async def _do_keepalive():
+                        await asyncio.sleep(STREAM_KEEPALIVE_INTERVAL)
+                        return b"event: ping\ndata: {\"type\": \"ping\"}\n\n"
+                    keepalive_task = asyncio.ensure_future(_do_keepalive())
+
+                    try:
+                        while True:
+                            done, _ = await asyncio.wait({data_task, keepalive_task}, return_when=asyncio.FIRST_COMPLETED)
+
+                            if keepalive_task in done:
+                                elapsed = time.monotonic() - last_data_time
+                                if elapsed > STREAM_CHUNK_TIMEOUT:
+                                    logger.warning(f"⚠️ Anthropic 流式 {elapsed:.0f}s 无数据，节点可能已断开 [{current_req_id[:8]}]")
+                                    break
+                                yield keepalive_task.result()
+                                keepalive_task = asyncio.ensure_future(_do_keepalive())
+                                continue
+
+                            last_data_time = time.monotonic()
+                            data_task = asyncio.ensure_future(current_queue.get())
+                            msg = done.pop().result()
+                            if msg.get("type") == "finish":
+                                stream_succeeded = True
+                                # 发送流结束事件
+                                for evt in converter.process_chunk("data: [DONE]"):
+                                    yield evt.encode("utf-8")
+                                break
+                            elif msg.get("type") == "error":
+                                err_data = {"type": "error", "error": {"type": "api_error", "message": msg.get("body", "unknown error")}}
+                                yield f"event: error\ndata: {json.dumps(err_data, ensure_ascii=False)}\n\n".encode("utf-8")
+                                break
+                            elif msg.get("type") == "chunk":
+                                for line in msg.get("body", "").split("\n"):
+                                    for evt in converter.process_chunk(line):
+                                        yield evt.encode("utf-8")
+                    finally:
+                        data_task.cancel()
+                        keepalive_task.cancel()
+                        await asyncio.gather(data_task, keepalive_task, return_exceptions=True)
+                        cleanup_pending_request(current_req_id)
+                        record_request_finished(
+                            route_key=route_key,
+                            status_code=status_code if stream_succeeded else 502,
+                            started_at=request_started_at, first_byte_at=first_byte_at,
+                            success=stream_succeeded, api_key_id=api_key_id,
+                        )
+
+                return StreamingResponse(
+                    anthropic_stream_generator(req_id, queue),
+                    status_code=status_code,
+                    media_type="text/event-stream",
+                    headers={"cache-control": "no-cache", "x-accel-buffering": "no"},
+                )
+            else:
+                # 非流式：收集完整响应后转换
+                raw_body = await collect_response_body(req_id, queue)
+                try:
+                    chat_resp = json.loads(raw_body)
+                except json.JSONDecodeError:
+                    record_request_finished(
+                        route_key=route_key, status_code=502,
+                        started_at=request_started_at, first_byte_at=first_byte_at,
+                        success=False, api_key_id=api_key_id,
+                    )
+                    return JSONResponse(
+                        {"type": "error", "error": {"type": "api_error", "message": "上游返回了非法 JSON"}},
+                        status_code=502,
+                    )
+
+                anthropic_resp = anthropic_convert_response(chat_resp, model)
+                record_request_finished(
+                    route_key=route_key, status_code=status_code,
+                    started_at=request_started_at, first_byte_at=first_byte_at,
+                    success=True, usage=chat_resp.get("usage"), api_key_id=api_key_id,
+                )
+                return JSONResponse(content=anthropic_resp)
+
+        except asyncio.TimeoutError:
+            retry_state.status_code = 504
+            retry_state.response_text = json.dumps({"type": "error", "error": {"type": "timeout_error", "message": "请求内网节点超时"}})
+            cleanup_pending_request(req_id)
+            continue
+        except Exception as e:
+            cleanup_pending_request(req_id)
+            raise e
+
+    record_request_finished(route_key=route_key, status_code=retry_state.status_code, started_at=request_started_at, first_byte_at=None, success=False, api_key_id=api_key_id)
+    try:
+        error_body = json.loads(retry_state.response_text)
+    except (json.JSONDecodeError, TypeError):
+        error_body = {"type": "error", "error": {"type": "api_error", "message": retry_state.response_text}}
+    return JSONResponse(content=error_body, status_code=retry_state.status_code)
 
 async def _forward_request(request: Request, path: str):
     if not state.active_clients:
