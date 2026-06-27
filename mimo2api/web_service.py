@@ -1063,6 +1063,7 @@ async def anthropic_messages_handler(request: Request):
 
                 async def _anthropic_sse(cur_req_id, cur_queue):
                     stream_ok = False
+                    usage_data = None
                     data_task = asyncio.ensure_future(cur_queue.get())
                     try:
                         while True:
@@ -1076,13 +1077,17 @@ async def anthropic_messages_handler(request: Request):
                             elif msg.get("type") == "error":
                                 break
                             elif msg.get("type") == "chunk":
-                                for line in msg.get("body", "").split("\n"):
+                                chunk_body = msg.get("body", "")
+                                # 提取 usage（token 用量统计）
+                                if usage_data is None:
+                                    usage_data = extract_usage_from_sse_chunk(chunk_body)
+                                for line in chunk_body.split("\n"):
                                     for ev in converter.process_chunk(line):
                                         yield ev.encode()
                     finally:
                         data_task.cancel()
                         cleanup_pending_request(cur_req_id)
-                        record_request_finished(route_key=route_key, status_code=status_code if stream_ok else 502, started_at=request_started_at, first_byte_at=first_byte_at, success=stream_ok, api_key_id=api_key_id)
+                        record_request_finished(route_key=route_key, status_code=status_code if stream_ok else 502, started_at=request_started_at, first_byte_at=first_byte_at, success=stream_ok, usage=usage_data, api_key_id=api_key_id)
 
                 return StreamingResponse(_anthropic_sse(req_id, queue), status_code=200, media_type="text/event-stream", headers={"cache-control": "no-cache", "x-accel-buffering": "no"})
 
@@ -1092,6 +1097,7 @@ async def anthropic_messages_handler(request: Request):
                 full_text = ""
                 tool_calls_data = []
                 finish_reason = "stop"
+                usage_data = None
                 while True:
                     msg = await queue.get()
                     if msg.get("type") == "finish":
@@ -1100,7 +1106,11 @@ async def anthropic_messages_handler(request: Request):
                         cleanup_pending_request(req_id)
                         return JSONResponse({"type": "error", "error": {"type": "api_error", "message": msg.get("body", "")}}, status_code=502)
                     elif msg.get("type") == "chunk":
-                        for line in msg.get("body", "").split("\n"):
+                        chunk_body = msg.get("body", "")
+                        # 提取 usage（token 用量统计）
+                        if usage_data is None:
+                            usage_data = extract_usage_from_sse_chunk(chunk_body)
+                        for line in chunk_body.split("\n"):
                             line = line.strip()
                             if not line.startswith("data:"):
                                 continue
@@ -1157,7 +1167,7 @@ async def anthropic_messages_handler(request: Request):
                     "stop_sequence": None,
                     "usage": {"input_tokens": 0, "output_tokens": 0},
                 }
-                record_request_finished(route_key=route_key, status_code=200, started_at=request_started_at, first_byte_at=first_byte_at, success=True, api_key_id=api_key_id)
+                record_request_finished(route_key=route_key, status_code=200, started_at=request_started_at, first_byte_at=first_byte_at, success=True, usage=usage_data, api_key_id=api_key_id)
                 return JSONResponse(content=anthropic_resp)
 
         except asyncio.TimeoutError:
