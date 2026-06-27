@@ -100,10 +100,6 @@ def convert_anthropic_request(req: dict[str, Any]) -> dict[str, Any]:
     if "tool_choice" in req:
         openai_req["tool_choice"] = _convert_tool_choice(req["tool_choice"])
 
-    # 如果流式，添加 stream_options 以获取 usage
-    if openai_req.get("stream"):
-        openai_req["stream_options"] = {"include_usage": True}
-
     return openai_req
 
 
