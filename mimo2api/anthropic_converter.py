@@ -615,12 +615,12 @@ class AnthropicStreamConverter:
         # 确保所有活跃的 block 被关闭
         events.extend(self._close_active_blocks())
 
-        # message_delta
+        # message_delta（包含完整 usage：此时上游的 usage chunk 已到达，input/output 都已知）
         stop_reason = _map_finish_reason(self.finish_reason)
         events.append(self._make_event("message_delta", {
             "type": "message_delta",
             "delta": {"stop_reason": stop_reason, "stop_sequence": None},
-            "usage": {"output_tokens": self.output_tokens},
+            "usage": {"input_tokens": self.input_tokens, "output_tokens": self.output_tokens},
         }))
 
         # message_stop
