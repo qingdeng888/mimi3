@@ -394,6 +394,20 @@ def apply_model_mapping(body_text: str) -> str:
         return json.dumps(data, ensure_ascii=False)
     return body_text
 
+def _inject_stream_options(body_text: str) -> str:
+    """为流式请求注入 stream_options: {include_usage: true}，确保上游返回 usage 数据用于统计。"""
+    try:
+        data = json.loads(body_text)
+    except (json.JSONDecodeError, AttributeError):
+        return body_text
+    if not isinstance(data, dict):
+        return body_text
+    if "stream_options" not in data:
+        data["stream_options"] = {"include_usage": True}
+    elif isinstance(data["stream_options"], dict) and "include_usage" not in data["stream_options"]:
+        data["stream_options"]["include_usage"] = True
+    return json.dumps(data, ensure_ascii=False)
+
 @app.get("/api/model_mapping")
 async def api_get_model_mapping():
     return JSONResponse(content=load_model_mapping())
@@ -842,6 +856,9 @@ async def responses_handler(request: Request):
         chat_req["stream"] = True
 
     chat_body_text = apply_model_mapping(json.dumps(chat_req, ensure_ascii=False))
+    # 注入 stream_options 确保上游返回 usage（token 用量统计所需）
+    if is_streaming:
+        chat_body_text = _inject_stream_options(chat_body_text)
     max_retries = min(MAX_RETRIES, get_available_client_count())
     if max_retries == 0:
         return Response("Gateway Error: 没有可用的内网节点", status_code=503)
@@ -1024,6 +1041,8 @@ async def anthropic_messages_handler(request: Request):
 
     # ── 2. 应用模型映射，序列化为 body_text ──
     body_text = apply_model_mapping(json.dumps(chat_req, ensure_ascii=False))
+    # 注入 stream_options 确保上游返回 usage（token 用量统计所需）
+    body_text = _inject_stream_options(body_text)
 
     # ── 3. 用跟 _forward_request 完全一样的路径转发到 bridge ──
     max_retries = min(MAX_RETRIES, get_available_client_count())
@@ -1204,6 +1223,9 @@ async def _forward_request(request: Request, path: str):
         is_streaming = json.loads(body_text).get("stream", False) is True
     except (json.JSONDecodeError, AttributeError):
         pass
+    # 自动注入 stream_options 确保上游返回 usage（token 用量统计所需）
+    if is_streaming:
+        body_text = _inject_stream_options(body_text)
     record_request_started(route_key, is_streaming=is_streaming, api_key_id=api_key_id)
 
     for attempt in range(max_retries):
