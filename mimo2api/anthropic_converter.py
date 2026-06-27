@@ -428,6 +428,7 @@ class AnthropicStreamConverter:
         self.message_id = _generate_msg_id()
         self.started = False
         self.current_text_block_index: Optional[int] = None
+        self._thinking_block_index: Optional[int] = None
         self.content_block_index = 0
         self.tool_call_buffers: dict[int, dict] = {}  # OpenAI tool_call index → buffer
         self.tool_block_indices: dict[int, int] = {}  # OpenAI tool_call index → anthropic block index
@@ -489,12 +490,31 @@ class AnthropicStreamConverter:
 
         # 处理 reasoning_content (thinking)
         if reasoning := delta.get("reasoning_content"):
-            # thinking 块 - 目前大多数场景我们跳过，或者简化处理
-            # 如果需要完整支持，可以添加 thinking block
-            pass
+            # 如果还没有 thinking block，先开一个
+            if not hasattr(self, '_thinking_block_index') or self._thinking_block_index is None:
+                self._thinking_block_index = self.content_block_index
+                self.content_block_index += 1
+                events.append(self._make_event("content_block_start", {
+                    "type": "content_block_start",
+                    "index": self._thinking_block_index,
+                    "content_block": {"type": "thinking", "thinking": ""},
+                }))
+            events.append(self._make_event("content_block_delta", {
+                "type": "content_block_delta",
+                "index": self._thinking_block_index,
+                "delta": {"type": "thinking_delta", "thinking": reasoning},
+            }))
 
         # 处理文本内容
         if content := delta.get("content"):
+            # 如果有 thinking block 还在活跃，先关闭它
+            if hasattr(self, '_thinking_block_index') and self._thinking_block_index is not None:
+                events.append(self._make_event("content_block_stop", {
+                    "type": "content_block_stop",
+                    "index": self._thinking_block_index,
+                }))
+                self._thinking_block_index = None
+
             if self.current_text_block_index is None:
                 # 开始一个新的 text block
                 self.current_text_block_index = self.content_block_index
@@ -513,6 +533,14 @@ class AnthropicStreamConverter:
 
         # 处理 tool_calls
         if tool_calls := delta.get("tool_calls"):
+            # 在 tool_calls 开始前，关闭 thinking block（如果活跃）
+            if self._thinking_block_index is not None and any(tc.get("id") for tc in tool_calls):
+                events.append(self._make_event("content_block_stop", {
+                    "type": "content_block_stop",
+                    "index": self._thinking_block_index,
+                }))
+                self._thinking_block_index = None
+
             # 在 tool_calls 开始前，如果有 text block 还在活跃，先关闭它
             if self.current_text_block_index is not None and any(tc.get("id") for tc in tool_calls):
                 events.append(self._make_event("content_block_stop", {
@@ -583,6 +611,11 @@ class AnthropicStreamConverter:
         """生成流结束事件。"""
         events = []
 
+        # 如果还没发送过 message_start，补发一个（极端边界情况：上游无任何 chunk 即结束）
+        if not self.started:
+            events.append(self._make_message_start({}))
+            self.started = True
+
         # 确保所有活跃的 block 被关闭
         events.extend(self._close_active_blocks())
 
@@ -602,6 +635,14 @@ class AnthropicStreamConverter:
     def _close_active_blocks(self) -> list[str]:
         """关闭所有活跃的内容块。"""
         events = []
+
+        # 关闭 thinking block
+        if hasattr(self, '_thinking_block_index') and self._thinking_block_index is not None:
+            events.append(self._make_event("content_block_stop", {
+                "type": "content_block_stop",
+                "index": self._thinking_block_index,
+            }))
+            self._thinking_block_index = None
 
         # 关闭 text block
         if self.current_text_block_index is not None:

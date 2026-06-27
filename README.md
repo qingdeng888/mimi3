@@ -35,7 +35,7 @@
 
 `mimi3` 实现了一个把 **小米 AI Studio (xiaomimimo.com)** 内部的 MiMo 模型对外开放为标准 LLM API 的网关：
 
-- **协议兼容**：以 OpenAI `/v1/*` 与 Anthropic `/anthropic/v1/*` 协议对外，业务侧几乎可以无改动接入。
+- **协议兼容**：以 OpenAI `/v1/*` 与 Anthropic 兼容协议对外（`/v1/messages` 自动识别），业务侧几乎可以无改动接入。支持 Claude Code、Cline 等 Anthropic SDK 客户端直连。
 - **账号池**：支持多账号轮询负载均衡 (Round-Robin)，自动跳过失效 / 限流节点。
 - **生命周期托管**：每个账号背后的 Claw 云沙箱容器寿命 ≤ 60 分钟，本网关自动错峰销毁、重建、注入桥接脚本，保证后端节点常在线。
 - **流式 + Keepalive**：完整支持 `stream=true`，并周期性发送 `: keep-alive` 防止 Cloudflare 等反代连接超时。
@@ -55,7 +55,7 @@
                                ▼
               ┌────────────────────────────────────────┐
               │  公网部署的 mimi3 网关 (FastAPI)         │
-              │   - /v1/*  /anthropic/v1/*             │
+              │   - /v1/*  (OpenAI + Anthropic 自动兼容) │
               │   - /webui (控制面板)                   │
               │   - /ws    (反向 WebSocket 隧道服务端)  │
               └──────────────┬────────────────┬────────┘
@@ -121,7 +121,8 @@ python main.py
 启动成功后访问：
 
 - 控制面板：`http://<你的服务器>:23655/webui`
-- API 基址：`http://<你的服务器>:23655/v1`（或 `/anthropic/v1`）
+- OpenAI API 基址：`http://<你的服务器>:23655/v1`
+- Anthropic API 基址：`http://<你的服务器>:23655`（SDK 自动拼接 `/v1/messages`）
 
 ---
 
@@ -134,7 +135,7 @@ python main.py
 | `SERVER_HOST` | 否 | `0.0.0.0` | 网关绑定地址。 |
 | `SERVER_PORT` | 否 | `23655` | 网关绑定端口。 |
 | `WS_TUNNEL_URL` | **是** | `ws://{HOST}:{PORT}/ws` | Claw 节点反向连接的 WebSocket 地址。**必须是 Claw 容器能访问到的公网/穿透地址**，例如 `ws://your-domain.com:23655/ws` 或 `wss://your-domain.com/ws`。端口可自由自定义，详见 [端口与 WS_TUNNEL_URL 自定义](#端口与-ws_tunnel_url-自定义)。 |
-| `MIMO_RELAY_OPENAI_KEY` | 否 | 空 | 客户端调用 `/v1/*`、`/anthropic/v1/*` 时携带的 Bearer Key。**留空 = 不鉴权**。支持多 Key：除该环境变量外，可在 WebUI「AI API Key 管理」面板动态添加 / 删除（持久化到 `api_keys.json`，**任一匹配即放行，无需重启**）。|
+| `MIMO_RELAY_OPENAI_KEY` | 否 | 空 | 客户端调用 `/v1/*` 时携带的 Bearer Key 或 `x-api-key`。**留空 = 不鉴权**。支持多 Key：除该环境变量外，可在 WebUI「AI API Key 管理」面板动态添加 / 删除（持久化到 `api_keys.json`，**任一匹配即放行，无需重启**）。|
 | `MIMO_WEBUI_USERNAME` | 否 | `admin` | WebUI 登录用户名。 |
 | `MIMO_WEBUI_PASSWORD` | 否 | 空 | WebUI 登录密码。**留空 = 不启用 WebUI 登录**。 |
 | `MIMO_WEBUI_SECRET` | 否 | 自动 | WebUI Session Cookie 签名密钥；缺省时使用密码兜底，建议显式设置一个长随机串。 |
@@ -185,7 +186,7 @@ MIMO_PROXY_URL=socks5://user:password@1.2.3.4:1080
 > - 查询状态 (`/open-apis/user/mimo-claw/status`)
 > - 获取 Ticket (`/open-apis/user/ws/ticket`)
 >
-> **不走代理**的部分：客户端的 `/v1/*`、`/anthropic/v1/*` API 转发，以及 Claw 容器反向连接到 `/ws` 的 WebSocket 隧道。
+> **不走代理**的部分：客户端的 `/v1/*` API 转发（包括 OpenAI 和 Anthropic 格式请求），以及 Claw 容器反向连接到 `/ws` 的 WebSocket 隧道。
 
 > **SOCKS5 依赖**：使用 SOCKS5 代理需要安装 `socksio`，项目 `requirements.txt` 已包含 `httpx[socks]`，会自动安装。
 
@@ -385,7 +386,7 @@ python main.py
 ## API 使用指南
 
 > 默认 API Base URL：`http://<你的服务器>:23655`
-> 若设置了 `MIMO_RELAY_OPENAI_KEY`，所有 `/v1/*` 与 `/anthropic/v1/*` 请求都需在 Header 中携带 `Authorization: Bearer <key>`（`x-api-key` / `api-key` 也兼容）。
+> 若设置了 `MIMO_RELAY_OPENAI_KEY`，所有 `/v1/*` 请求都需在 Header 中携带 `Authorization: Bearer <key>`（Anthropic SDK 的 `x-api-key` / `api-key` 也兼容）。
 
 ### 可用模型
 
@@ -447,13 +448,16 @@ curl -N http://your-host:23655/v1/responses \
 
 ### Anthropic 兼容接口
 
-#### `POST /anthropic/v1/messages`
+> **无需额外前缀**：参考 new-api，本网关在 `/v1/messages` 直接支持 Anthropic Messages 格式。客户端只需设置 base_url 即可自动兼容，不需要加 `/anthropic` 前缀。
 
-直接以 Claude Messages 协议调用：
+#### `POST /v1/messages`（推荐）
+
+直接以 Anthropic Messages 协议调用（Claude Code / Cline / Anthropic SDK 默认路径）：
 
 ```bash
-curl -N http://your-host:23655/anthropic/v1/messages \
-  -H "Authorization: Bearer $MIMO_RELAY_OPENAI_KEY" \
+curl -N http://your-host:23655/v1/messages \
+  -H "x-api-key: $MIMO_RELAY_OPENAI_KEY" \
+  -H "anthropic-version: 2023-06-01" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "mimo-v2.5-pro",
@@ -465,11 +469,20 @@ curl -N http://your-host:23655/anthropic/v1/messages \
   }'
 ```
 
-适用于 Claude Code、Cline、各类 Anthropic SDK。
+网关会自动将 Anthropic 格式转为 OpenAI Chat Completions 格式转发给上游，再将响应转回 Anthropic 格式返回。支持：
+- `system` 顶层字段
+- `tool_use` / `tool_result` 工具调用
+- `thinking` 推理块
+- 流式 SSE（`message_start` / `content_block_delta` / `message_stop` 等）
+- 非流式完整响应
 
-#### `GET /anthropic/v1/models`
+#### `POST /anthropic/v1/messages`（兼容旧路径）
 
-列出可用模型（Anthropic schema）。
+与 `/v1/messages` 功能完全相同，保留此路径做向后兼容。
+
+#### `GET /v1/models`（自动识别格式）
+
+当请求携带 `x-api-key` + `anthropic-version` 头时，自动返回 Anthropic 格式的模型列表；否则返回 OpenAI 格式。
 
 ### TTS 语音合成
 
@@ -566,7 +579,7 @@ for chunk in resp:
 from anthropic import Anthropic
 
 client = Anthropic(
-    base_url="http://your-host:23655/anthropic",
+    base_url="http://your-host:23655",      # 无需加 /v1 或 /anthropic 前缀
     api_key="sk-your-random-secret-here",
 )
 msg = client.messages.create(
@@ -577,11 +590,26 @@ msg = client.messages.create(
 print(msg.content[0].text)
 ```
 
+### Claude Code
+
+在 Claude Code 中直接使用，只需设置环境变量：
+
+```bash
+export ANTHROPIC_BASE_URL=http://your-host:23655
+export ANTHROPIC_API_KEY=sk-your-random-secret-here
+
+# 然后正常使用 claude 命令即可
+claude
+```
+
+> Claude Code 会自动请求 `$ANTHROPIC_BASE_URL/v1/messages`，网关在该路径已实现完整的 Anthropic Messages 格式兼容。
+
 ### 第三方 UI
 
 - **Cherry Studio / NextChat / LobeChat**：选「OpenAI 兼容」，Base URL 填 `http://your-host:23655/v1`，Key 填 `MIMO_RELAY_OPENAI_KEY`。
 - **OneAPI / NewAPI**：作为「OpenAI」上游接入即可。
-- **Cline / Claude Code**：选「Anthropic」，Base URL 填 `http://your-host:23655/anthropic`。
+- **Claude Code**：设置环境变量 `ANTHROPIC_BASE_URL=http://your-host:23655`，`ANTHROPIC_API_KEY=your-key`。
+- **Cline / Continue / Anthropic SDK 客户端**：Base URL 填 `http://your-host:23655`（无需加任何前缀），Key 填 `MIMO_RELAY_OPENAI_KEY`。
 
 ---
 
@@ -673,7 +701,8 @@ docker compose logs -f mimi3
 启动后：
 
 - 控制面板：`http://<宿主机 IP>:23655/webui`
-- API 基址：`http://<宿主机 IP>:23655/v1`、`http://<宿主机 IP>:23655/anthropic/v1`
+- OpenAI API 基址：`http://<宿主机 IP>:23655/v1`
+- Anthropic API 基址：`http://<宿主机 IP>:23655`（Claude Code / Anthropic SDK 直连）
 
 #### 镜像内置默认行为
 
@@ -818,12 +847,13 @@ mimi3/
 ├── logs/                         # 运行日志（首次运行后自动创建）
 ├── data/                         # Docker 部署时的持久化目录（指标库/快照/锁）
 └── mimo2api/
-    ├── web_service.py            # FastAPI 主服务，所有 /v1 /anthropic 路由
+    ├── web_service.py            # FastAPI 主服务，所有 /v1 路由（自动兼容 OpenAI + Anthropic）
     ├── manager.py                # 多账号 Claw 生命周期管理 + 桥接注入
     ├── bridge.py                 # 注入到 Claw 容器内部的反向 WS 桥接脚本
     ├── ui_router.py              # WebUI / 账号管理 / 鉴权登录路由
-    ├── auth.py                   # API & WebUI 鉴权（Bearer + 签名 Cookie）
+    ├── auth.py                   # API & WebUI 鉴权（Bearer + x-api-key + 签名 Cookie）
     ├── gateway_state.py          # 全局运行时状态（节点池、队列、冷却表）
+    ├── anthropic_converter.py    # Anthropic Messages ↔ OpenAI Chat Completions 协议互转
     ├── responses_converter.py    # OpenAI Responses ↔ Chat Completions 协议互转
     ├── audio_helpers.py          # TTS 请求/音频 base64 处理
     ├── metrics_store.py          # SQLite 指标持久化、统计聚合
