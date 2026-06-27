@@ -1084,10 +1084,28 @@ async def anthropic_messages_handler(request: Request):
                     stream_ok = False
                     usage_data = None
                     data_task = asyncio.ensure_future(cur_queue.get())
+                    keepalive_task = None
+
+                    async def _do_keepalive():
+                        await asyncio.sleep(STREAM_KEEPALIVE_INTERVAL)
+                        return b": keep-alive\n\n"
+                    keepalive_task = asyncio.ensure_future(_do_keepalive())
+
                     try:
                         while True:
-                            msg = await data_task
+                            done, _ = await asyncio.wait({data_task, keepalive_task}, return_when=asyncio.FIRST_COMPLETED)
+
+                            if keepalive_task in done:
+                                elapsed = time.monotonic() - last_data_time_ref[0]
+                                if elapsed > STREAM_CHUNK_TIMEOUT:
+                                    break
+                                yield keepalive_task.result()
+                                keepalive_task = asyncio.ensure_future(_do_keepalive())
+                                continue
+
+                            last_data_time_ref[0] = time.monotonic()
                             data_task = asyncio.ensure_future(cur_queue.get())
+                            msg = done.pop().result()
                             if msg.get("type") == "finish":
                                 stream_ok = True
                                 for ev in converter.process_chunk("data: [DONE]"):
@@ -1097,17 +1115,22 @@ async def anthropic_messages_handler(request: Request):
                                 break
                             elif msg.get("type") == "chunk":
                                 chunk_body = msg.get("body", "")
-                                # 提取 usage（token 用量统计）
-                                if usage_data is None:
-                                    usage_data = extract_usage_from_sse_chunk(chunk_body)
+                                # 每个 chunk 都尝试提取 usage（取最后出现的有效值）
+                                extracted = extract_usage_from_sse_chunk(chunk_body)
+                                if extracted is not None:
+                                    usage_data = extracted
                                 for line in chunk_body.split("\n"):
                                     for ev in converter.process_chunk(line):
                                         yield ev.encode()
                     finally:
                         data_task.cancel()
+                        if keepalive_task is not None:
+                            keepalive_task.cancel()
+                        await asyncio.gather(data_task, keepalive_task, return_exceptions=True)
                         cleanup_pending_request(cur_req_id)
                         record_request_finished(route_key=route_key, status_code=status_code if stream_ok else 502, started_at=request_started_at, first_byte_at=first_byte_at, success=stream_ok, usage=usage_data, api_key_id=api_key_id)
 
+                last_data_time_ref = [time.monotonic()]
                 return StreamingResponse(_anthropic_sse(req_id, queue), status_code=200, media_type="text/event-stream", headers={"cache-control": "no-cache", "x-accel-buffering": "no"})
 
             # ── 5. 非流式：收集完整响应 → 转为 Anthropic JSON ──
@@ -1126,9 +1149,10 @@ async def anthropic_messages_handler(request: Request):
                         return JSONResponse({"type": "error", "error": {"type": "api_error", "message": msg.get("body", "")}}, status_code=502)
                     elif msg.get("type") == "chunk":
                         chunk_body = msg.get("body", "")
-                        # 提取 usage（token 用量统计）
-                        if usage_data is None:
-                            usage_data = extract_usage_from_sse_chunk(chunk_body)
+                        # 每个 chunk 都尝试提取 usage
+                        extracted = extract_usage_from_sse_chunk(chunk_body)
+                        if extracted is not None:
+                            usage_data = extracted
                         for line in chunk_body.split("\n"):
                             line = line.strip()
                             if not line.startswith("data:"):
