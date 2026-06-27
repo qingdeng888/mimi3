@@ -1,7 +1,7 @@
 import asyncio, websockets, httpx, json, os, urllib.parse
 
 KEY = os.getenv("MIMO_API_KEY", "")
-BASE_URL = os.getenv("MIMO_API_BASE_URL", "").rstrip("/")
+BASE_URL = os.getenv("MIMO_API_BASE_URL", "https://aistudio.xiaomimimo.com").rstrip("/")
 WS_URL = "__WS_URL__"
 
 # 桥接归属账号 uid 占位符；manager.py 会用 json.dumps(uid) 整体替换下面 BRIDGE_UID 赋值那一行
