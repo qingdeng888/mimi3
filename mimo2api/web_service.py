@@ -966,12 +966,22 @@ _MODELS = [
 
 
 @app.get("/v1/models")
-async def get_models():
-    data = [{"id": m[0], "object": "model", "created": 1700000000, "owned_by": "mimo", "context_length": m[2], "max_tokens": m[2]} for m in _MODELS]
-    return JSONResponse(content={"object": "list", "data": data})
+async def get_models(request: Request):
+    """自动识别客户端类型：Anthropic SDK 带 x-api-key + anthropic-version 头时返回 Anthropic 格式，否则返回 OpenAI 格式。"""
+    # 参考 new-api: 通过请求头自动判断客户端类型
+    if request.headers.get("x-api-key") and request.headers.get("anthropic-version"):
+        return _models_anthropic_format()
+    return _models_openai_format()
 
 @app.get("/anthropic/v1/models")
 async def get_anthropic_models():
+    return _models_anthropic_format()
+
+def _models_openai_format():
+    data = [{"id": m[0], "object": "model", "created": 1700000000, "owned_by": "mimo", "context_length": m[2], "max_tokens": m[2]} for m in _MODELS]
+    return JSONResponse(content={"object": "list", "data": data})
+
+def _models_anthropic_format():
     data = [
         {
             "id": model_id,
@@ -988,6 +998,11 @@ async def get_anthropic_models():
 @app.post("/v1/chat/completions")
 async def chat_completions_handler(request: Request):
     return await _forward_request(request, "/v1/chat/completions")
+
+@app.post("/v1/messages")
+async def v1_messages_handler(request: Request):
+    """兼容 Anthropic SDK / Claude Code —— 直接走 /v1/messages，无需 /anthropic 前缀。"""
+    return await anthropic_messages_handler(request)
 
 @app.post("/anthropic/v1/messages")
 async def anthropic_messages_handler(request: Request):
