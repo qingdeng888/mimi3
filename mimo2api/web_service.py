@@ -408,6 +408,57 @@ def _inject_stream_options(body_text: str) -> str:
         data["stream_options"]["include_usage"] = True
     return json.dumps(data, ensure_ascii=False)
 
+def _inject_openclaw_system_prompt(body_text: str) -> str:
+    """为所有请求注入 OpenClaw 必需的系统提示词，避免 MiClaw 返回 400 错误。
+
+    OpenAI 格式：在 messages 开头注入 system role
+    处理逻辑：
+      - 如果已有 system 消息，在其内容前追加提示词
+      - 如果没有 system 消息，在 messages 开头插入新的 system 消息
+    """
+    REQUIRED_PROMPT = "You are a personal assistant running inside OpenClaw"
+
+    try:
+        data = json.loads(body_text)
+    except (json.JSONDecodeError, AttributeError):
+        return body_text
+
+    if not isinstance(data, dict):
+        return body_text
+
+    messages = data.get("messages")
+    if not isinstance(messages, list) or len(messages) == 0:
+        return body_text
+
+    # 检查第一条消息是否为 system
+    if messages[0].get("role") == "system":
+        # 已有 system 消息，在其内容前追加提示词
+        existing_content = messages[0].get("content", "")
+        if isinstance(existing_content, str):
+            # 避免重复注入
+            if REQUIRED_PROMPT not in existing_content:
+                messages[0]["content"] = f"{REQUIRED_PROMPT}\n\n{existing_content}"
+                logger.debug(f"💉 已在现有 system 消息前追加 OpenClaw 提示词")
+        elif isinstance(existing_content, list):
+            # content 为数组格式（多模态消息），在第一个 text 块前追加
+            for block in existing_content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    text = block.get("text", "")
+                    if REQUIRED_PROMPT not in text:
+                        block["text"] = f"{REQUIRED_PROMPT}\n\n{text}"
+                        logger.debug(f"💉 已在现有 system 消息（多模态）前追加 OpenClaw 提示词")
+                    break
+    else:
+        # 没有 system 消息，在开头插入
+        messages.insert(0, {
+            "role": "system",
+            "content": REQUIRED_PROMPT
+        })
+        logger.debug(f"💉 已注入 OpenClaw 系统提示词到 messages 开头")
+
+    data["messages"] = messages
+    return json.dumps(data, ensure_ascii=False)
+
 @app.get("/api/model_mapping")
 async def api_get_model_mapping():
     return JSONResponse(content=load_model_mapping())
@@ -765,6 +816,8 @@ async def audio_speech_handler(payload: AudioSpeechRequest, request: Request):
         "audio": {"format": payload.response_format.lower(), "voice": map_openai_tts_voice(payload.voice)},
     }
     body_text = json.dumps(mimo_payload, ensure_ascii=False)
+    # 注入 OpenClaw 必需的系统提示词
+    body_text = _inject_openclaw_system_prompt(body_text)
     
     max_retries = min(MAX_RETRIES, get_available_client_count())
     if max_retries == 0:
@@ -856,6 +909,8 @@ async def responses_handler(request: Request):
         chat_req["stream"] = True
 
     chat_body_text = apply_model_mapping(json.dumps(chat_req, ensure_ascii=False))
+    # 注入 OpenClaw 必需的系统提示词
+    chat_body_text = _inject_openclaw_system_prompt(chat_body_text)
     # 注入 stream_options 确保上游返回 usage（token 用量统计所需）
     if is_streaming:
         chat_body_text = _inject_stream_options(chat_body_text)
@@ -1047,6 +1102,8 @@ async def anthropic_messages_handler(request: Request):
 
     # ── 2. 应用模型映射，序列化为 body_text ──
     body_text = apply_model_mapping(json.dumps(chat_req, ensure_ascii=False))
+    # 注入 OpenClaw 必需的系统提示词
+    body_text = _inject_openclaw_system_prompt(body_text)
     # 注入 stream_options 确保上游返回 usage（token 用量统计所需）
     body_text = _inject_stream_options(body_text)
 
@@ -1249,6 +1306,8 @@ async def _forward_request(request: Request, path: str):
     retry_state = RetryState()
     body_text = body.decode("utf-8", "ignore").lstrip("\ufeff")
     body_text = apply_model_mapping(body_text)
+    # \u6ce8\u5165 OpenClaw \u5fc5\u9700\u7684\u7cfb\u7edf\u63d0\u793a\u8bcd
+    body_text = _inject_openclaw_system_prompt(body_text)
     route_key = path
     request_started_at = time.monotonic()
     api_key_id = getattr(request.state, "api_key_id", None)
