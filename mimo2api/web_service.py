@@ -859,6 +859,11 @@ async def responses_handler(request: Request):
     # 注入 stream_options 确保上游返回 usage（token 用量统计所需）
     if is_streaming:
         chat_body_text = _inject_stream_options(chat_body_text)
+
+    # 🔍 调试日志
+    logger.warning(f"🔍 [/v1/responses] 原始 Responses 请求 - model: {req_body.get('model')}, has_instructions: {bool(req_body.get('instructions'))}")
+    logger.warning(f"🔍 [/v1/responses] 转换后的 OpenAI 格式请求体: {chat_body_text}")
+
     max_retries = min(MAX_RETRIES, get_available_client_count())
     if max_retries == 0:
         return Response("Gateway Error: 没有可用的内网节点", status_code=503)
@@ -884,6 +889,7 @@ async def responses_handler(request: Request):
             if status_code >= 400:
                 content_type, response_headers = normalize_response_headers(first_msg.get("headers", {}))
                 raw_body = await collect_response_body(req_id, queue)
+                logger.error(f"❌ [/v1/responses] 上游返回错误 - status_code: {status_code}, body: {raw_body[:1000]}")
                 record_error("/v1/responses", status_code, f"上游返回 {status_code}", detail=raw_body[:500])
                 record_request_finished(route_key=route_key, status_code=status_code, started_at=request_started_at, first_byte_at=first_byte_at, success=False, api_key_id=api_key_id)
                 return Response(raw_body, status_code=status_code, media_type=content_type, headers=response_headers)
@@ -1044,6 +1050,10 @@ async def anthropic_messages_handler(request: Request):
     # 注入 stream_options 确保上游返回 usage（token 用量统计所需）
     body_text = _inject_stream_options(body_text)
 
+    # 🔍 调试日志
+    logger.warning(f"🔍 [/v1/messages] 原始 Anthropic 请求 - model: {req_body.get('model')}, has_system: {bool(req_body.get('system'))}, messages_count: {len(req_body.get('messages', []))}")
+    logger.warning(f"🔍 [/v1/messages] 转换后的 OpenAI 格式请求体: {body_text}")
+
     # ── 3. 用跟 _forward_request 完全一样的路径转发到 bridge ──
     max_retries = min(MAX_RETRIES, get_available_client_count())
     if max_retries == 0:
@@ -1073,6 +1083,7 @@ async def anthropic_messages_handler(request: Request):
             # 上游返回错误，直接透传
             if status_code >= 400:
                 raw_body = await collect_response_body(req_id, queue)
+                logger.error(f"❌ [/v1/messages] 上游返回错误 - status_code: {status_code}, body: {raw_body[:1000]}")
                 record_request_finished(route_key=route_key, status_code=status_code, started_at=request_started_at, first_byte_at=first_byte_at, success=False, api_key_id=api_key_id)
                 return JSONResponse({"type": "error", "error": {"type": "api_error", "message": raw_body[:1000]}}, status_code=status_code)
 
