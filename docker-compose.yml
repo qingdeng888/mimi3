@@ -63,6 +63,11 @@ services:
       # 模型映射（可被 WebUI / API 在线编辑），单文件挂载需保证宿主上文件存在
       - ./model_mapping.json:/app/model_mapping.json
 
+    # 自定义 hosts 解析，绕过 DNS 直连指定 IP
+    extra_hosts:
+      - "aistudio.xiaomimimo.com:8.222.147.102"
+      - "api.xiequ.cn:111.12.25.192"
+
     healthcheck:
       test:
         - CMD
