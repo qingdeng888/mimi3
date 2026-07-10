@@ -716,6 +716,7 @@
                             <td>
                                 ${disableBtn}
                                 <button class="btn" style="background:#2563EB; margin-right:6px; font-size:12px; padding:6px 12px;" onclick="injectBridge('${u.userId}')" ${isDisabled ? 'disabled title="请先启用"' : ''}>重新注入</button>
+                                <button class="btn" style="background:#DC2626; margin-right:6px; font-size:12px; padding:6px 12px;" onclick="resetAndInject('${u.userId}')" ${isDisabled ? 'disabled title="请先启用"' : ''}>重置且重新注入</button>
                                 <button class="btn btn-danger" onclick="destroyClaw('${u.userId}')" style="margin-right:6px; font-size:12px; padding:6px 12px;" ${isDisabled ? 'disabled title="请先启用"' : ''}>销毁miclaw</button>
                                 <button class="btn btn-danger" onclick="deleteUser('${u.userId}')" style="font-size:12px; padding:6px 12px;">删除</button>
                             </td>
@@ -837,6 +838,25 @@
             } catch(e) {
                 if (e.message !== 'UNAUTHORIZED') {
                     showToast('注入请求异常: ' + e.message, 'error');
+                }
+            }
+        }
+
+        async function resetAndInject(uid) {
+            if(!confirm(`⚠️ 确定要重置账号 ${uid} 的 miclaw 容器并重新注入吗？\n\n此操作将：\n1. 重置 miclaw 容器（Factory Reset）\n2. 等待容器重启\n3. 重新连接并注入 bridge 脚本\n\n整个过程约需 3-5 分钟，请耐心等待。`)) return;
+            showToast(`正在重置且重新注入 ${uid}，预计需要 3-5 分钟...`, 'info');
+            try {
+                const res = await apiFetch(`/api/users/reset-and-inject/${uid}`, {method: 'POST'});
+                const data = await res.json();
+                if(res.ok) {
+                    showToast(`${uid} 重置且重新注入成功！`);
+                    fetchUsers();
+                } else {
+                    showToast(`重置且重新注入失败: ${data.detail || '未知错误'}`, 'error');
+                }
+            } catch(e) {
+                if (e.message !== 'UNAUTHORIZED') {
+                    showToast('重置且重新注入请求异常: ' + e.message, 'error');
                 }
             }
         }
