@@ -528,6 +528,37 @@
         </div>
     </div>
 
+    <!-- 健康检查日志卡片 -->
+    <div class="container" style="margin-top: 20px;">
+        <div class="glass-card">
+            <div class="flex-between">
+                <h2 style="margin: 0; font-size: 18px;">🏥 健康检查日志</h2>
+                <button class="btn" onclick="loadHealthCheckLogs()" style="font-size: 12px; padding: 6px 12px;">
+                    刷新日志
+                </button>
+            </div>
+            <div class="table-wrapper" style="margin-top: 12px;">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>时间</th>
+                            <th>账号 ID</th>
+                            <th>状态</th>
+                            <th>详情</th>
+                            <th>耗时(秒)</th>
+                        </tr>
+                    </thead>
+                    <tbody id="healthCheckLogsBody">
+                        <tr><td colspan="5" class="empty-state">加载中...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+            <div style="margin-top: 8px; font-size: 12px; color: var(--text-muted);">
+                说明：每 5 分钟自动检测，节点上线后 15 秒快速检测。连续 2 次失败触发轻量级重启，连续 3 次失败触发重度重启。
+            </div>
+        </div>
+    </div>
+
     <!-- 导入弹窗 -->
     <div class="modal-overlay" id="importModal">
         <div class="modal">
@@ -1338,9 +1369,47 @@
             }
         }
 
+        async function loadHealthCheckLogs() {
+            try {
+                const res = await apiFetch('/api/health-check/logs');
+                const data = await res.json();
+                const tbody = document.getElementById('healthCheckLogsBody');
+
+                if (data.logs && data.logs.length > 0) {
+                    tbody.innerHTML = data.logs.map(log => {
+                        const statusIcon = log.status === 'success' ? '✅' :
+                                          log.status === 'failed' ? '❌' :
+                                          log.status === 'restart_light' ? '🔄' : '💥';
+                        const statusText = log.status === 'success' ? '成功' :
+                                          log.status === 'failed' ? '失败' :
+                                          log.status === 'restart_light' ? '轻量级重启' : '重度重启';
+                        const statusClass = log.status === 'success' ? 'color: #10B981' :
+                                           log.status === 'failed' ? 'color: #EF4444' :
+                                           log.status === 'restart_light' ? 'color: #F59E0B' : 'color: #EF4444';
+
+                        return `<tr>
+                            <td style="font-size: 12px; color: var(--text-muted);">${log.timestamp}</td>
+                            <td style="font-weight: 600;">${log.uid}</td>
+                            <td style="${statusClass}">${statusIcon} ${statusText}</td>
+                            <td style="font-size: 12px;">${log.message}</td>
+                            <td style="text-align: center;">${log.elapsed > 0 ? log.elapsed : '-'}</td>
+                        </tr>`;
+                    }).join('');
+                } else {
+                    tbody.innerHTML = '<tr><td colspan="5" class="empty-state">暂无健康检查日志</td></tr>';
+                }
+            } catch (e) {
+                if (e.message !== 'UNAUTHORIZED') {
+                    console.error('加载健康检查日志失败', e);
+                }
+            }
+        }
+
         async function initializeDashboard() {
-            await Promise.all([fetchStatus(), fetchClients(), fetchUsers(), fetchProxy(), fetchXiequ(), fetchKeys()]);
+            await Promise.all([fetchStatus(), fetchClients(), fetchUsers(), fetchProxy(), fetchXiequ(), fetchKeys(), loadHealthCheckLogs()]);
             startStatusPolling();
+            // 每 30 秒刷新一次健康检查日志
+            setInterval(loadHealthCheckLogs, 30000);
         }
 
         async function bootstrap() {

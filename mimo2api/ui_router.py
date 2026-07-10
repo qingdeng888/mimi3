@@ -447,6 +447,17 @@ async def api_users_reset_and_inject(uid: str):
         return JSONResponse({"detail": message}, status_code=502)
 
 
+@router.get("/api/health-check/logs")
+async def api_health_check_logs():
+    """获取健康检查日志"""
+    from .health_checker import _health_checker
+
+    return JSONResponse({
+        "logs": _health_checker.check_logs,
+        "failed_counts": _health_checker.failed_counts
+    })
+
+
 @router.patch("/api/users/rename/{uid}")
 async def api_users_rename(uid: str, request: Request):
     """修改账号备注名（仅更新 name 字段，不影响凭证与生命周期）"""

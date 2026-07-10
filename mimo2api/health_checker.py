@@ -46,6 +46,23 @@ class HealthChecker:
         self.last_check_time: Dict[str, float] = {}  # uid -> 上次检查时间
         self.checking: Dict[str, bool] = {}  # uid -> 是否正在检查
         self.failed_counts: Dict[str, int] = {}  # uid -> 连续失败次数
+        # 健康检查日志（最近 100 条）
+        self.check_logs: list[Dict] = []
+        self.max_logs = 100
+
+    def _add_log(self, uid: str, status: str, message: str, elapsed: float = 0):
+        """添加健康检查日志"""
+        from datetime import datetime
+        log_entry = {
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "uid": uid,
+            "status": status,  # "success", "failed", "restart_light", "restart_heavy"
+            "message": message,
+            "elapsed": round(elapsed, 2) if elapsed else 0
+        }
+        self.check_logs.insert(0, log_entry)  # 最新的在前面
+        if len(self.check_logs) > self.max_logs:
+            self.check_logs = self.check_logs[:self.max_logs]  # 保留最近的
 
     async def check_api_health(self, uid: Optional[str] = None) -> bool:
         """检查 API 健康状态
@@ -88,24 +105,33 @@ class HealthChecker:
 
                 if response.status_code == 200:
                     data = response.json()
-                    content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                    content = data.get("choices", [{}])[0].get("message", {}).get("content") or ""
+                    reasoning = data.get("choices", [{}])[0].get("message", {}).get("reasoning_content") or ""
+                    total_content = content + reasoning
                     logger.info(
                         f"{label} ✅ API 健康检查通过 "
-                        f"(耗时 {elapsed:.2f}s, 响应长度 {len(content)} 字符)"
+                        f"(耗时 {elapsed:.2f}s, 响应长度 {len(total_content)} 字符)"
                     )
+                    self._add_log(uid or "global", "success",
+                                  f"健康检查通过 (响应长度 {len(total_content)} 字符)", elapsed)
+                    logger.debug(f"[DEBUG] 健康检查日志已添加，当前日志数量: {len(self.check_logs)}")
                     return True
                 else:
                     logger.error(
                         f"{label} ❌ API 健康检查失败: HTTP {response.status_code}, "
                         f"响应: {response.text[:200]}"
                     )
+                    self._add_log(uid or "global", "failed",
+                                  f"HTTP {response.status_code}: {response.text[:100]}", elapsed)
                     return False
 
         except httpx.TimeoutException:
             logger.error(f"{label} ❌ API 健康检查超时（>{HEALTH_CHECK_TIMEOUT}s）")
+            self._add_log(uid or "global", "failed", f"超时（>{HEALTH_CHECK_TIMEOUT}s）", 0)
             return False
         except Exception as e:
             logger.error(f"{label} ❌ API 健康检查异常: {e}", exc_info=True)
+            self._add_log(uid or "global", "failed", f"异常: {str(e)[:100]}", 0)
             return False
 
     async def restart_bridge_light(self, uid: str) -> bool:
@@ -120,6 +146,7 @@ class HealthChecker:
         from .manager import _account_managers, _claw_creation_lock, NativeClawClient
 
         logger.warning(f"[账号 {uid}] 🔄 连续 {LIGHT_RESTART_THRESHOLD} 次健康检查失败，执行轻量级重启（仅重启 bridge）...")
+        self._add_log(uid, "restart_light", "开始轻量级重启（仅重启 bridge）", 0)
 
         # 获取 AccountManager 实例
         manager = _account_managers.get(str(uid))
@@ -158,13 +185,16 @@ class HealthChecker:
 
                 if node_online:
                     logger.info(f"[账号 {uid}] ✅ 轻量级重启成功，节点已重新上线")
+                    self._add_log(uid, "success", "轻量级重启成功，节点已重新上线", 0)
                     return True
                 else:
                     logger.error(f"[账号 {uid}] ❌ 轻量级重启失败，节点未在 3 分钟内上线")
+                    self._add_log(uid, "failed", "轻量级重启失败，节点未在 3 分钟内上线", 0)
                     return False
 
             except Exception as e:
                 logger.error(f"[账号 {uid}] ❌ 轻量级重启过程异常: {e}", exc_info=True)
+                self._add_log(uid, "failed", f"轻量级重启异常: {str(e)[:100]}", 0)
                 return False
 
         # 创建锁自动释放
@@ -181,6 +211,7 @@ class HealthChecker:
         from .manager import _account_managers
 
         logger.error(f"[账号 {uid}] 💥 连续 {HEAVY_RESTART_THRESHOLD} 次健康检查失败，执行重度重启（重置 miclaw + 重新注入）...")
+        self._add_log(uid, "restart_heavy", "开始重度重启（重置 miclaw + 重新注入）", 0)
 
         # 获取 AccountManager 实例
         manager = _account_managers.get(str(uid))
@@ -194,13 +225,16 @@ class HealthChecker:
 
             if success:
                 logger.info(f"[账号 {uid}] ✅ 重度重启成功: {message}")
+                self._add_log(uid, "success", f"重度重启成功: {message}", 0)
                 return True
             else:
                 logger.error(f"[账号 {uid}] ❌ 重度重启失败: {message}")
+                self._add_log(uid, "failed", f"重度重启失败: {message}", 0)
                 return False
 
         except Exception as e:
             logger.error(f"[账号 {uid}] ❌ 重度重启过程异常: {e}", exc_info=True)
+            self._add_log(uid, "failed", f"重度重启异常: {str(e)[:100]}", 0)
             return False
 
     async def monitor_account(self, uid: str):

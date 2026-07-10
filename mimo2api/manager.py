@@ -975,10 +975,13 @@ class AccountManager:
                 if disconnected_count > 0:
                     self.logger.info(f"[账号 {self.uid}] 已断开 {disconnected_count} 个旧连接")
 
-                # 2. 调用自身的 reset_claw 方法重置容器
+                # 2. 创建客户端并调用 reset_claw 方法重置容器
                 self.logger.info(f"[账号 {self.uid}] 正在重置 miclaw 容器...")
-                if not await self.reset_claw():
+                client = NativeClawClient(self.ph, self.cookies, self.logger)
+                if not await client.reset_claw():
+                    await client.close()
                     return False, "重置 miclaw 失败"
+                await client.close()
 
                 # 3. 等待容器重启（约 30 秒）
                 self.logger.info(f"[账号 {self.uid}] 等待容器重启...")
@@ -1029,6 +1032,9 @@ class AccountManager:
 
                 if node_online:
                     self.logger.info(f"[账号 {self.uid}] ✅ 重置且重新注入成功，节点已上线")
+                    # 启动健康检查守护线程（节点上线后 15 秒会自动执行首次检查）
+                    from .health_checker import start_health_check_for_account
+                    start_health_check_for_account(self.uid)
                     return True, "重置且重新注入成功"
                 else:
                     return False, "节点未在 10 分钟内上线"
