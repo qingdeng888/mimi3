@@ -559,7 +559,7 @@
                 </table>
             </div>
             <div style="margin-top: 8px; font-size: 12px; color: var(--text-muted);">
-                说明：每 5 分钟自动检测，节点上线后 15 秒快速检测。连续 2 次失败触发轻量级重启，连续 3 次失败触发重度重启。
+                说明：每 3 分钟自动检测，节点上线后 15 秒快速检测。第 1～9 次连续失败都会让 miclaw 重启 Bridge，第 10 次才重置 miclaw 并重新注入。
             </div>
         </div>
     </div>

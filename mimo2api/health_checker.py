@@ -3,10 +3,10 @@
 API 健康检查模块
 
 功能：
-1. 定时检测 API 响应状态（每 5 分钟）
+1. 定时检测 API 响应状态（每 3 分钟）
 2. Bridge 上线后 15 秒快速检测
-3. 轻量级重启（连续2次失败）：通过 WebSocket 让 miclaw 重启 bridge
-4. 重度重启（连续3次失败）：重置 miclaw + 重新注入
+3. 轻量级重启（第1～9次连续失败）：通过 WebSocket 让 miclaw 重启 bridge
+4. 重度重启（连续10次失败）：重置 miclaw + 重新注入
 5. 使用 .env 配置的 API Key 和固定测试模型
 """
 
@@ -20,15 +20,15 @@ import httpx
 logger = logging.getLogger("HealthChecker")
 
 # 健康检查配置
-HEALTH_CHECK_INTERVAL = 300  # 5 分钟
+HEALTH_CHECK_INTERVAL = 180  # 3 分钟
 HEALTH_CHECK_QUICK_DELAY = 15  # Bridge 上线后 15 秒快速检测
 HEALTH_CHECK_TIMEOUT = 30  # 检测超时时间（秒）
 HEALTH_CHECK_MODEL = "mimo-v2.5-pro"  # 测试模型
 HEALTH_CHECK_MESSAGE = "你是谁"  # 测试消息
 
 # 失败阈值
-LIGHT_RESTART_THRESHOLD = 2  # 连续2次失败触发轻量级重启
-HEAVY_RESTART_THRESHOLD = 3  # 连续3次失败触发重度重启
+LIGHT_RESTART_THRESHOLD = 1  # 每次失败都触发轻量级重启
+HEAVY_RESTART_THRESHOLD = 10  # 连续10次失败触发重度重启
 
 # 从环境变量读取配置
 SERVER_HOST = os.getenv("SERVER_HOST", "127.0.0.1")
@@ -152,7 +152,7 @@ class HealthChecker:
         """
         from .manager import _account_managers, _claw_creation_lock, NativeClawClient
 
-        logger.warning(f"[账号 {uid}] 🔄 连续 {LIGHT_RESTART_THRESHOLD} 次健康检查失败，执行轻量级重启（仅重启 bridge）...")
+        logger.warning(f"[账号 {uid}] 🔄 健康检查连续失败，执行轻量级重启（仅重启 bridge）...")
         self._add_log(uid, "restart_light", "开始轻量级重启（仅重启 bridge）", 0)
 
         # 获取 AccountManager 实例
@@ -178,7 +178,7 @@ class HealthChecker:
                     return False
 
                 # 发送重启 bridge 指令
-                restart_cmd = "请帮我重启前面的 bridge 脚本，先 kill 掉所有包含 ws:// 的 python 进程，然后重新用 nohup 后台运行 bridge 脚本。"
+                restart_cmd = "重启之前运行的bridge"
                 logger.info(f"[账号 {uid}] 下发重启 bridge 指令...")
                 reply = await client.send_message(restart_cmd, timeout=60)
                 logger.info(f"[账号 {uid}] 重启反馈: {reply[:200] if reply else '(无响应)'}")
@@ -310,27 +310,8 @@ class HealthChecker:
                         f"(连续 {self.failed_counts[uid]} 次)"
                     )
 
-                    # 连续失败 2 次则触发轻量级重启
-                    if self.failed_counts[uid] == LIGHT_RESTART_THRESHOLD:
-                        logger.warning(
-                            f"[账号 {uid}] 连续 {self.failed_counts[uid]} 次健康检查失败，"
-                            f"触发轻量级重启（通过 WS 让 miclaw 重启 bridge）"
-                        )
-                        restart_success = await self.restart_bridge_light(uid)
-
-                        if restart_success:
-                            # 轻量级重启成功，重置失败计数，15秒后再次快速检查
-                            logger.info(f"[账号 {uid}] 轻量级重启成功，重置失败计数")
-                            self.failed_counts[uid] = 0
-                            self.checking[uid] = False
-                            await asyncio.sleep(HEALTH_CHECK_QUICK_DELAY)
-                            continue
-                        else:
-                            # 轻量级重启失败，等待下一个周期再试
-                            logger.error(f"[账号 {uid}] 轻量级重启失败，将在下个周期重试")
-
-                    # 连续失败 3 次则触发重度重启
-                    elif self.failed_counts[uid] >= HEAVY_RESTART_THRESHOLD:
+                    # 连续失败达到重度阈值，才重置 miclaw 并重新注入
+                    if self.failed_counts[uid] >= HEAVY_RESTART_THRESHOLD:
                         logger.error(
                             f"[账号 {uid}] 连续 {self.failed_counts[uid]} 次健康检查失败，"
                             f"触发重度重启（重置 miclaw + 重新注入）"
@@ -338,7 +319,7 @@ class HealthChecker:
                         restart_success = await self.restart_bridge_heavy(uid)
 
                         if restart_success:
-                            # 重度重启成功，重置失败计数，15秒后再次快速检查
+                            # 已完成重置和重新注入，从新的健康检查周期开始计数
                             logger.info(f"[账号 {uid}] 重度重启成功，重置失败计数")
                             self.failed_counts[uid] = 0
                             self.checking[uid] = False
@@ -347,6 +328,27 @@ class HealthChecker:
                         else:
                             # 重度重启失败，等待下一个周期再试
                             logger.error(f"[账号 {uid}] 重度重启失败，将在下个周期重试")
+
+                    # 第 1～9 次连续失败都让 miclaw 自行重启 bridge，不重新注入
+                    elif self.failed_counts[uid] >= LIGHT_RESTART_THRESHOLD:
+                        logger.warning(
+                            f"[账号 {uid}] 连续 {self.failed_counts[uid]} 次健康检查失败，"
+                            f"触发轻量级重启（通过 WS 让 miclaw 重启 bridge）"
+                        )
+                        restart_success = await self.restart_bridge_light(uid)
+
+                        if restart_success:
+                            # Bridge 上线不代表 API 已恢复；保留失败次数，15 秒后重新验证
+                            logger.info(
+                                f"[账号 {uid}] 轻量级重启成功，保留连续失败计数 "
+                                f"{self.failed_counts[uid]}，15 秒后重新检查"
+                            )
+                            self.checking[uid] = False
+                            await asyncio.sleep(HEALTH_CHECK_QUICK_DELAY)
+                            continue
+                        else:
+                            # 轻量级重启失败，等待下一个周期再试
+                            logger.error(f"[账号 {uid}] 轻量级重启失败，将在下个周期重试")
 
                 self.checking[uid] = False
 
