@@ -96,6 +96,13 @@ def _revoke_sessions_for_uid(uid: str) -> int:
 # 用全局集合持强引用，避免 Py 3.11+ 出现 "Task was destroyed but it is pending"。
 _ws_close_tasks: set[asyncio.Task] = set()
 
+# WebUI 重置且重新注入任务。长耗时操作不能占用浏览器 HTTP 连接，否则容易被
+# 浏览器或反向代理提前断开并误报 "Load failed"。
+_reset_reinject_tasks: dict[str, asyncio.Task] = {}
+_reset_reinject_jobs: dict[str, dict] = {}
+_restart_bridge_tasks: dict[str, asyncio.Task] = {}
+_restart_bridge_jobs: dict[str, dict] = {}
+
 
 def _fire_and_forget_close(ws, code: int = 1000) -> None:
     """异步发起 ws.close(code) 但不等待，调用方立即返回。"""
@@ -422,7 +429,7 @@ async def api_users_inject(uid: str):
 
 @router.post("/api/users/reset-and-inject/{uid}")
 async def api_users_reset_and_inject(uid: str):
-    """手动触发重置 miclaw 并重新注入 bridge 脚本"""
+    """启动后台任务，重置 miclaw 并重新注入 bridge 脚本。"""
     from .manager import _account_managers, AccountManager
 
     target_file = os.path.join(USERS_DIR, f"user_{uid}.json")
@@ -440,11 +447,114 @@ async def api_users_reset_and_inject(uid: str):
             return JSONResponse({"detail": f"读取账号文件失败: {e}"}, status_code=500)
         mgr = AccountManager(uid, user_data)
 
-    success, message = await mgr.reset_and_reinject()
-    if success:
-        return JSONResponse({"status": "ok", "message": message})
-    else:
-        return JSONResponse({"detail": message}, status_code=502)
+    uid = str(uid)
+    existing_task = _reset_reinject_tasks.get(uid)
+    if existing_task is not None and not existing_task.done():
+        return JSONResponse({"detail": "该账号已有重置且重新注入任务正在执行"}, status_code=409)
+
+    job = {
+        "uid": uid,
+        "status": "running",
+        "message": "重置且重新注入任务已启动",
+        "started_at": int(time.time()),
+        "finished_at": None,
+    }
+    _reset_reinject_jobs[uid] = job
+
+    async def _run_reset_and_reinject() -> None:
+        try:
+            success, message = await mgr.reset_and_reinject()
+            job["status"] = "success" if success else "failed"
+            job["message"] = message
+        except asyncio.CancelledError:
+            job["status"] = "failed"
+            job["message"] = "任务因服务停止而取消"
+            raise
+        except Exception as exc:
+            job["status"] = "failed"
+            job["message"] = f"重置且重新注入异常: {exc}"
+        finally:
+            job["finished_at"] = int(time.time())
+
+    task = asyncio.create_task(_run_reset_and_reinject())
+    _reset_reinject_tasks[uid] = task
+
+    def _remove_completed_task(completed_task: asyncio.Task, task_uid: str = uid) -> None:
+        if _reset_reinject_tasks.get(task_uid) is completed_task:
+            _reset_reinject_tasks.pop(task_uid, None)
+
+    task.add_done_callback(_remove_completed_task)
+
+    return JSONResponse(job, status_code=202)
+
+
+@router.get("/api/users/reset-and-inject/{uid}/status")
+async def api_users_reset_and_inject_status(uid: str):
+    """查询指定账号最近一次重置且重新注入任务的状态。"""
+    job = _reset_reinject_jobs.get(str(uid))
+    if job is None:
+        return JSONResponse({"detail": "未找到该账号的重置任务"}, status_code=404)
+    return JSONResponse(job)
+
+
+@router.post("/api/users/restart-bridge/{uid}")
+async def api_users_restart_bridge(uid: str):
+    """启动后台任务，通过 miclaw WebSocket 指令重启 Bridge。"""
+    from .manager import _account_managers
+    from .health_checker import _health_checker
+
+    uid = str(uid)
+    if not os.path.exists(os.path.join(USERS_DIR, f"user_{uid}.json")):
+        return JSONResponse({"detail": "User not found"}, status_code=404)
+    if uid not in _account_managers:
+        return JSONResponse({"detail": "账号尚未加载，无法连接 miclaw"}, status_code=409)
+
+    existing_task = _restart_bridge_tasks.get(uid)
+    if existing_task is not None and not existing_task.done():
+        return JSONResponse({"detail": "该账号已有 Bridge 重启任务正在执行"}, status_code=409)
+
+    job = {
+        "uid": uid,
+        "status": "running",
+        "message": "Bridge 重启任务已启动",
+        "started_at": int(time.time()),
+        "finished_at": None,
+    }
+    _restart_bridge_jobs[uid] = job
+
+    async def _run_restart_bridge() -> None:
+        try:
+            success = await _health_checker.restart_bridge_light(uid)
+            job["status"] = "success" if success else "failed"
+            job["message"] = "Bridge 已重启并重新上线" if success else "Bridge 重启失败或未重新上线"
+        except asyncio.CancelledError:
+            job["status"] = "failed"
+            job["message"] = "任务因服务停止而取消"
+            raise
+        except Exception as exc:
+            job["status"] = "failed"
+            job["message"] = f"Bridge 重启异常: {exc}"
+        finally:
+            job["finished_at"] = int(time.time())
+
+    task = asyncio.create_task(_run_restart_bridge())
+    _restart_bridge_tasks[uid] = task
+
+    def _remove_completed_task(completed_task: asyncio.Task, task_uid: str = uid) -> None:
+        if _restart_bridge_tasks.get(task_uid) is completed_task:
+            _restart_bridge_tasks.pop(task_uid, None)
+
+    task.add_done_callback(_remove_completed_task)
+    return JSONResponse(job, status_code=202)
+
+
+@router.get("/api/users/restart-bridge/{uid}/status")
+async def api_users_restart_bridge_status(uid: str):
+    """查询指定账号最近一次 Bridge 重启任务状态。"""
+    job = _restart_bridge_jobs.get(str(uid))
+    if job is None:
+        return JSONResponse({"detail": "未找到该账号的 Bridge 重启任务"}, status_code=404)
+    return JSONResponse(job)
 
 
 @router.get("/api/health-check/logs")

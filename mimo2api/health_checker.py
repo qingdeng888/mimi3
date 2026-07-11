@@ -161,6 +161,13 @@ class HealthChecker:
             logger.error(f"[账号 {uid}] ❌ 找不到对应的 AccountManager，无法重启")
             return False
 
+        from .gateway_state import state as gw_state
+        previous_ws_ids = {
+            ws_id
+            for ws_id, mapped_uid in gw_state.client_uid_map.items()
+            if mapped_uid == uid
+        }
+
         # 获取全局创建锁（防止其他账号同时创建）
         logger.info(f"[账号 {uid}] 🔒 等待获取全局创建锁...")
         async with _claw_creation_lock:
@@ -187,8 +194,12 @@ class HealthChecker:
 
                 # 等待节点重新上线（最多等待 3 分钟）
                 logger.info(f"[账号 {uid}] 等待节点重新上线（最多 3 分钟）...")
-                from .manager import _wait_for_node_online
-                node_online = await _wait_for_node_online(uid, timeout=180)
+                from .manager import _wait_for_node_reconnected
+                node_online = await _wait_for_node_reconnected(
+                    uid,
+                    previous_ws_ids=previous_ws_ids,
+                    timeout=180,
+                )
 
                 if node_online:
                     logger.info(f"[账号 {uid}] ✅ 轻量级重启成功，节点已重新上线")
@@ -356,6 +367,9 @@ class HealthChecker:
                 await asyncio.sleep(HEALTH_CHECK_INTERVAL)
 
             except asyncio.CancelledError:
+                # 任务可能在健康检查或重启流程的任意 await 点被替换。
+                # 必须释放账号级检查标记，否则新任务会永久认为旧检查仍在执行。
+                self.checking[uid] = False
                 logger.info(f"[账号 {uid}] 健康检查守护线程已停止")
                 break
             except Exception as e:
@@ -382,6 +396,9 @@ def start_health_check_for_account(uid: str):
         if not task.done():
             logger.info(f"[账号 {uid}] 已存在健康检查任务，先取消旧任务")
             task.cancel()
+
+    # 新守护任务不应继承已取消任务的运行中状态。
+    _health_checker.checking[uid] = False
 
     # 创建新任务
     task = asyncio.create_task(_health_checker.monitor_account(uid))

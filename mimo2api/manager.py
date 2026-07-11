@@ -45,8 +45,15 @@ _claw_creation_lock = asyncio.Lock()
 _NODE_ONLINE_WAIT_TIMEOUT = 300  # 5 分钟
 
 
-async def _wait_for_node_online(uid: str, timeout: float = _NODE_ONLINE_WAIT_TIMEOUT) -> bool:
+async def _wait_for_node_online(
+    uid: str,
+    timeout: float = _NODE_ONLINE_WAIT_TIMEOUT,
+    session_token: str | None = None,
+) -> bool:
     """等待指定 uid 的节点在 gateway 中上线（出现在 client_uid_map 中）。
+
+    指定 session_token 时，只接受本次新注入 Bridge 的连接，避免旧 Bridge
+    重连后被误判为重置成功。
 
     返回 True 表示节点已上线，False 表示超时未上线。
     """
@@ -55,9 +62,31 @@ async def _wait_for_node_online(uid: str, timeout: float = _NODE_ONLINE_WAIT_TIM
     while (asyncio.get_event_loop().time() - start) < timeout:
         # 检查 client_uid_map 中是否存在该 uid
         for ws_id, mapped_uid in _gw_state.client_uid_map.items():
-            if mapped_uid == uid:
+            if mapped_uid == uid and (
+                session_token is None
+                or _gw_state.client_session_map.get(ws_id) == session_token
+            ):
                 return True
         await asyncio.sleep(3)
+    return False
+
+
+async def _wait_for_node_reconnected(
+    uid: str,
+    previous_ws_ids: set[int],
+    timeout: float = _NODE_ONLINE_WAIT_TIMEOUT,
+) -> bool:
+    """等待指定账号出现不属于重启前连接集合的新 WebSocket 连接。"""
+    from .gateway_state import state as _gw_state
+
+    start = asyncio.get_event_loop().time()
+    while (asyncio.get_event_loop().time() - start) < timeout:
+        if any(
+            mapped_uid == uid and ws_id not in previous_ws_ids
+            for ws_id, mapped_uid in _gw_state.client_uid_map.items()
+        ):
+            return True
+        await asyncio.sleep(1)
     return False
 
 # miclaw 过期后固定等待 24 小时才允许再次创建
@@ -582,7 +611,7 @@ class NativeClawClient:
             self.logger.error(f"销毁 Claw 异常: {e}")
             return False
 
-    async def reset_claw(self) -> bool:
+    async def reset_claw(self) -> str | None:
         """重置 Claw 实例（Factory Reset）
 
         调用 /open-apis/user/mimo-claw/reset 接口重置容器。
@@ -597,14 +626,15 @@ class NativeClawClient:
                 r = await client.post(url, cookies=c_copy, headers=_aistudio_headers(), timeout=30)
                 data = r.json()
                 if data.get("code") == 0:
-                    self.logger.info(f"重置请求发送成功: {data.get('data', {}).get('status')}")
-                    return True
+                    status = str(data.get("data", {}).get("status") or "")
+                    self.logger.info(f"重置请求发送成功: {status}")
+                    return status
                 else:
                     self.logger.error(f"重置失败: code={data.get('code')}, msg={data.get('msg')}")
-                    return False
+                    return None
         except Exception as e:
             self.logger.error(f"重置 Claw 异常: {e}")
-            return False
+            return None
 
     async def _create_and_wait(self) -> bool:
         """创建 Claw 实例并等待其可用
@@ -962,7 +992,18 @@ class AccountManager:
             self.logger.info(f"[账号 {self.uid}] ✅ 已获取全局创建锁")
 
             try:
-                # 1. 断开当前所有该账号的 WebSocket 连接
+                # 1. 撤销旧 Bridge session，防止旧进程在重置期间重新接入并造成假上线
+                old_tokens = [
+                    token
+                    for token, token_uid in list(gw_state.valid_sessions.items())
+                    if token_uid == str(self.uid)
+                ]
+                for token in old_tokens:
+                    gw_state.valid_sessions.pop(token, None)
+                if old_tokens:
+                    self.logger.info(f"[账号 {self.uid}] 已撤销 {len(old_tokens)} 个旧 Bridge session")
+
+                # 2. 断开当前所有该账号的 WebSocket 连接
                 disconnected_count = 0
                 for ws in list(gw_state.active_clients):
                     ws_id = id(ws)
@@ -976,30 +1017,60 @@ class AccountManager:
                 if disconnected_count > 0:
                     self.logger.info(f"[账号 {self.uid}] 已断开 {disconnected_count} 个旧连接")
 
-                # 2. 创建客户端并调用 reset_claw 方法重置容器
+                # 3. 创建客户端并调用 reset_claw 方法重置容器
                 self.logger.info(f"[账号 {self.uid}] 正在重置 miclaw 容器...")
                 client = NativeClawClient(self.ph, self.cookies, self.logger)
-                if not await client.reset_claw():
+                reset_status = await client.reset_claw()
+                if reset_status is None:
                     await client.close()
                     return False, "重置 miclaw 失败"
                 await client.close()
 
-                # 3. 等待容器重启（约 30 秒）
-                self.logger.info(f"[账号 {self.uid}] 等待容器重启...")
-                await asyncio.sleep(30)
+                # 4. 轮询确认 Factory Reset 真正完成，不能用固定 sleep 代替状态确认
+                self.logger.info(
+                    f"[账号 {self.uid}] 等待容器完成重置并恢复 AVAILABLE "
+                    f"(初始状态: {reset_status or 'UNKNOWN'})..."
+                )
+                reset_deadline = asyncio.get_event_loop().time() + 300
+                reset_completed = False
+                last_status = reset_status
+                while asyncio.get_event_loop().time() < reset_deadline:
+                    status, _ = await self.get_instance_status()
+                    if status and status != last_status:
+                        self.logger.info(f"[账号 {self.uid}] 重置状态变化: {last_status or 'UNKNOWN'} -> {status}")
+                        last_status = status
+                    if status == "AVAILABLE":
+                        reset_completed = True
+                        break
+                    await asyncio.sleep(5)
 
-                # 4. 创建新的客户端并重新连接容器
+                if not reset_completed:
+                    return False, f"miclaw 重置后 5 分钟内未恢复 AVAILABLE（当前状态: {last_status or 'UNKNOWN'}）"
+
+                # 给 AVAILABLE 后的内部服务少量启动时间，避免 Ticket 已就绪但 Agent 尚未就绪
+                await asyncio.sleep(5)
+
+                # 5. 创建新的客户端并重新连接容器
                 self.logger.info(f"[账号 {self.uid}] 重新连接容器...")
                 client = NativeClawClient(self.ph, self.cookies, self.logger)
                 if not await self.connect_with_retry(client, max_retries=10, create=False):
                     await client.close()
                     return False, "重置后重新连接失败"
 
-                # 5. 注入 bridge 脚本（最多重试3次）
+                # 6. 注入 bridge 脚本（最多重试3次）
                 inject_success = False
+                expected_session_token = None
                 for inject_attempt in range(3):
                     self.logger.info(f"[账号 {self.uid}] 正在注入 bridge（第 {inject_attempt+1}/3 次）...")
                     bridge_code = await get_bridge_code(self.uid)
+                    expected_session_token = next(
+                        (
+                            token
+                            for token, token_uid in gw_state.valid_sessions.items()
+                            if token_uid == str(self.uid)
+                        ),
+                        None,
+                    )
                     inject_prompt = (
                         "好，帮我安装websockets和httpx。\n"
                         "然后，请先将当前主机上正在运行（如果有的话）的所有资源桥接脚本进程杀掉"
@@ -1027,9 +1098,13 @@ class AccountManager:
                 if not inject_success:
                     return False, "注入 bridge 3 次全部被拒绝"
 
-                # 6. 等待节点上线（最多10分钟）
+                # 7. 等待本次新 session 对应的节点上线（最多10分钟）
                 self.logger.info(f"[账号 {self.uid}] ⏳ 等待节点上线（最多 10 分钟）...")
-                node_online = await _wait_for_node_online(self.uid, timeout=600)
+                node_online = await _wait_for_node_online(
+                    self.uid,
+                    timeout=600,
+                    session_token=expected_session_token,
+                )
 
                 if node_online:
                     self.logger.info(f"[账号 {self.uid}] ✅ 重置且重新注入成功，节点已上线")

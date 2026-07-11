@@ -751,6 +751,7 @@
                             </td>
                             <td>
                                 ${disableBtn}
+                                <button class="btn" style="background:#D97706; margin-right:6px; font-size:12px; padding:6px 12px;" onclick="restartBridge('${u.userId}')" ${isDisabled ? 'disabled title="请先启用"' : ''}>重启 Bridge</button>
                                 <button class="btn" style="background:#2563EB; margin-right:6px; font-size:12px; padding:6px 12px;" onclick="injectBridge('${u.userId}')" ${isDisabled ? 'disabled title="请先启用"' : ''}>重新注入</button>
                                 <button class="btn" style="background:#DC2626; margin-right:6px; font-size:12px; padding:6px 12px;" onclick="resetAndInject('${u.userId}')" ${isDisabled ? 'disabled title="请先启用"' : ''}>重置且重新注入</button>
                                 <button class="btn btn-danger" onclick="destroyClaw('${u.userId}')" style="margin-right:6px; font-size:12px; padding:6px 12px;" ${isDisabled ? 'disabled title="请先启用"' : ''}>销毁miclaw</button>
@@ -880,21 +881,86 @@
 
         async function resetAndInject(uid) {
             if(!confirm(`⚠️ 确定要重置账号 ${uid} 的 miclaw 容器并重新注入吗？\n\n此操作将：\n1. 重置 miclaw 容器（Factory Reset）\n2. 等待容器重启\n3. 重新连接并注入 bridge 脚本\n\n整个过程约需 3-5 分钟，请耐心等待。`)) return;
-            showToast(`正在重置且重新注入 ${uid}，预计需要 3-5 分钟...`, 'info');
             try {
                 const res = await apiFetch(`/api/users/reset-and-inject/${uid}`, {method: 'POST'});
                 const data = await res.json();
-                if(res.ok) {
-                    showToast(`${uid} 重置且重新注入成功！`);
-                    fetchUsers();
-                } else {
+                if(!res.ok) {
                     showToast(`重置且重新注入失败: ${data.detail || '未知错误'}`, 'error');
+                    return;
                 }
+
+                showToast(`${uid} 重置任务已启动，正在后台执行...`, 'info');
+                await pollResetAndInjectStatus(uid);
             } catch(e) {
                 if (e.message !== 'UNAUTHORIZED') {
                     showToast('重置且重新注入请求异常: ' + e.message, 'error');
                 }
             }
+        }
+
+        async function restartBridge(uid) {
+            if(!confirm(`确定要让账号 ${uid} 的 miclaw 重启当前 Bridge 吗？\n\n系统将通过 WS 下发指令“重启之前运行的bridge”，并等待新的 Bridge 连接上线。`)) return;
+            try {
+                const res = await apiFetch(`/api/users/restart-bridge/${uid}`, {method: 'POST'});
+                const data = await res.json();
+                if(!res.ok) {
+                    showToast(`重启 Bridge 失败: ${data.detail || '未知错误'}`, 'error');
+                    return;
+                }
+
+                showToast(`${uid} Bridge 重启指令正在后台执行...`, 'info');
+                await pollRestartBridgeStatus(uid);
+            } catch(e) {
+                if (e.message !== 'UNAUTHORIZED') {
+                    showToast('重启 Bridge 请求异常: ' + e.message, 'error');
+                }
+            }
+        }
+
+        async function pollRestartBridgeStatus(uid) {
+            const maxAttempts = 100;
+            for (let attempt = 0; attempt < maxAttempts; attempt++) {
+                await new Promise(resolve => setTimeout(resolve, 2000));
+                const res = await apiFetch(`/api/users/restart-bridge/${uid}/status`);
+                const data = await res.json();
+                if (!res.ok) throw new Error(data.detail || '查询 Bridge 重启状态失败');
+                if (data.status === 'success') {
+                    showToast(`${uid} Bridge 重启成功！`);
+                    await fetchUsers();
+                    return;
+                }
+                if (data.status === 'failed') {
+                    showToast(`重启 Bridge 失败: ${data.message || '未知错误'}`, 'error');
+                    return;
+                }
+            }
+            showToast('Bridge 重启任务仍在后台执行，请稍后查看节点状态', 'info');
+        }
+
+        async function pollResetAndInjectStatus(uid) {
+            const maxAttempts = 300;
+            for (let attempt = 0; attempt < maxAttempts; attempt++) {
+                await new Promise(resolve => setTimeout(resolve, 2000));
+
+                const res = await apiFetch(`/api/users/reset-and-inject/${uid}/status`);
+                const data = await res.json();
+                if (!res.ok) {
+                    throw new Error(data.detail || '查询任务状态失败');
+                }
+
+                if (data.status === 'success') {
+                    showToast(`${uid} 重置且重新注入成功！`);
+                    await fetchUsers();
+                    return;
+                }
+                if (data.status === 'failed') {
+                    showToast(`重置且重新注入失败: ${data.message || '未知错误'}`, 'error');
+                    await fetchUsers();
+                    return;
+                }
+            }
+
+            showToast('重置任务仍在后台执行，请稍后刷新账号状态', 'info');
         }
 
         async function destroyClaw(uid) {
