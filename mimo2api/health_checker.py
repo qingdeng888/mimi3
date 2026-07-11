@@ -64,6 +64,13 @@ class HealthChecker:
         if len(self.check_logs) > self.max_logs:
             self.check_logs = self.check_logs[:self.max_logs]  # 保留最近的
 
+    def clear_logs(self) -> int:
+        """清空 WebUI 展示的健康检查日志，并返回清理条数。"""
+        cleared_count = len(self.check_logs)
+        self.check_logs.clear()
+        logger.info(f"🧹 已清空 {cleared_count} 条健康检查展示日志")
+        return cleared_count
+
     async def check_api_health(self, uid: Optional[str] = None) -> bool:
         """检查 API 健康状态
 

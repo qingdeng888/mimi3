@@ -533,11 +533,16 @@
         <div class="glass-card">
             <div class="flex-between">
                 <h2 style="margin: 0; font-size: 18px;">🏥 健康检查日志</h2>
-                <button class="btn" onclick="loadHealthCheckLogs()" style="font-size: 12px; padding: 6px 12px;">
-                    刷新日志
-                </button>
+                <div style="display: flex; gap: 8px;">
+                    <button class="btn btn-outline" onclick="clearHealthCheckLogs()" style="font-size: 12px; padding: 6px 12px;">
+                        清空日志
+                    </button>
+                    <button class="btn" onclick="loadHealthCheckLogs()" style="font-size: 12px; padding: 6px 12px;">
+                        刷新日志
+                    </button>
+                </div>
             </div>
-            <div class="table-wrapper" style="margin-top: 12px;">
+            <div class="table-wrapper" style="margin-top: 12px; max-height: 520px; overflow-y: auto;">
                 <table>
                     <thead>
                         <tr>
@@ -1401,6 +1406,25 @@
             } catch (e) {
                 if (e.message !== 'UNAUTHORIZED') {
                     console.error('加载健康检查日志失败', e);
+                }
+            }
+        }
+
+        async function clearHealthCheckLogs() {
+            if (!confirm('确定要清空全部健康检查日志吗？\n连续失败计数不会受到影响。')) return;
+
+            try {
+                const res = await apiFetch('/api/health-check/logs', { method: 'DELETE' });
+                const data = await res.json();
+                if (res.ok) {
+                    showToast(data.message || '健康检查日志已清空');
+                    await loadHealthCheckLogs();
+                } else {
+                    showToast(data.detail || '清空健康检查日志失败', 'error');
+                }
+            } catch (e) {
+                if (e.message !== 'UNAUTHORIZED') {
+                    showToast('清空健康检查日志请求异常', 'error');
                 }
             }
         }

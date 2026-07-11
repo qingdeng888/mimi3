@@ -854,6 +854,7 @@ class AccountManager:
         self.is_first_round = True
         self._rebuild_delay_until: float = 0
         self._had_successful_run: bool = False
+        self._has_ever_been_online: bool = False
         # 重建事件：用于健康检查失败时触发重启 bridge
         self._rebuild_event = asyncio.Event()
 
@@ -1255,7 +1256,14 @@ class AccountManager:
                     if node_online:
                         self.logger.info(f"✅ 账号 {self.uid} 节点已上线，释放全局创建锁。")
                         # 启动健康检查守护线程
-                        from .health_checker import start_health_check_for_account
+                        from .health_checker import _health_checker, start_health_check_for_account
+                        if not self._has_ever_been_online:
+                            cleared_count = _health_checker.clear_logs()
+                            self._has_ever_been_online = True
+                            self.logger.info(
+                                f"🧹 新账号 {self.uid} 的 Bridge 首次上线，"
+                                f"已清空之前的 {cleared_count} 条健康检查日志"
+                            )
                         start_health_check_for_account(self.uid)
                     else:
                         self.logger.error(f"🚫 账号 {self.uid} 等待节点上线超过 10 分钟，自动禁用！")

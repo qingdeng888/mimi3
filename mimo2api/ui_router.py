@@ -458,6 +458,19 @@ async def api_health_check_logs():
     })
 
 
+@router.delete("/api/health-check/logs")
+async def api_health_check_logs_clear():
+    """清空 WebUI 展示的健康检查日志，不影响连续失败计数。"""
+    from .health_checker import _health_checker
+
+    cleared_count = _health_checker.clear_logs()
+    return JSONResponse({
+        "status": "ok",
+        "cleared_count": cleared_count,
+        "message": f"已清空 {cleared_count} 条健康检查日志",
+    })
+
+
 @router.patch("/api/users/rename/{uid}")
 async def api_users_rename(uid: str, request: Request):
     """修改账号备注名（仅更新 name 字段，不影响凭证与生命周期）"""
