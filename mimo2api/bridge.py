@@ -53,11 +53,13 @@ async def handle_request(ws, req, client, lock):
         path = path[3:]  # 去掉 path 开头的 /v1
     target_url = f"{base}{path}"
 
-    # 使用 miclaw 容器本身的 headers 伪装
+    # MIMO 侧对 API 做了 User-Agent 白名单校验，每个请求必须带：
+    #   Header "User-Agent: mimo-claw"
+    # 与 _inject_openclaw_system_prompt 同类的必需字段补齐。
     forward_headers = {
         "Content-Type": "application/json",
         "Accept": "*/*",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
+        "User-Agent": "mimo-claw",
         "Origin": "https://aistudio.xiaomimimo.com",
         "Referer": "https://aistudio.xiaomimimo.com/",
         "x-timezone": "Asia/Shanghai",
