@@ -319,7 +319,8 @@ async def api_users_add(request: Request):
             parsed[match.group(1)] = match.group(2)
             
         uid = parsed.get("userId")
-        st = parsed.get("serviceToken")
+        # 兼容两种凭证格式：原生的 serviceToken 或抓包所得带前缀的 xiaomichatbot_serviceToken
+        st = parsed.get("serviceToken") or parsed.get("xiaomichatbot_serviceToken")
         ph = parsed.get("xiaomichatbot_ph")
         
         if not uid or not st or not ph:

@@ -571,7 +571,7 @@
             <div class="form-group">
                 <label class="form-label">Cookie / 凭证数据字符串</label>
                 <textarea id="cookieInput" class="form-control" placeholder='例如: serviceToken="vjQ..."; userId=686621...; xiaomichatbot_ph="6vv..."'></textarea>
-                <div class="form-hint">支持自动解析多格式文本，需至少包含 <code>userId</code>, <code>serviceToken</code> 及 <code>xiaomichatbot_ph</code>。系统会自动提取值。</div>
+                <div class="form-hint">支持自动解析多格式文本，需至少包含 <code>userId</code>, <code>serviceToken</code> 及 <code>xiaomichatbot_ph</code>。系统会自动提取值。兼容抓包格式 <code>xiaomichatbot_serviceToken="..."</code>（自动识别为 serviceToken）。</div>
             </div>
             <div class="modal-actions">
                 <button class="btn btn-outline" onclick="closeModal()">取消</button>
